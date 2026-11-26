@@ -23,17 +23,26 @@ public:
             length = info.st_size;
             seals = ::fcntl(fd, F_GET_SEALS);
         }
-        emit readable();
+        if (!held)
+            emit readable();
         return Io::Ok;
     }
     Io receive(Frame &frame) override {
-        frame = {Kind::Reply, serial, encode(DecodeReport{DecodeCode::Unsupported}), {}};
+        frame = {Kind::Reply,
+                 serial,
+                 encode(DecodeReport{DecodeCode::Unsupported, {}, {0, 0}, "Fixture"}),
+                 {}};
         return Io::Ok;
     }
     quint64 serial = 0;
     std::size_t count = 0;
     qint64 length = -1;
     int seals = -1;
+    bool held = false;
+    void release() {
+        held = false;
+        emit readable();
+    }
 };
 
 class ReportChild : public Child {
@@ -66,6 +75,70 @@ private:
 class PipelineTest : public QObject {
     Q_OBJECT
 private slots:
+    void backpressure() {
+        PixelChild *child = nullptr;
+        Pool pool(
+            [&] {
+                auto process = std::make_unique<PixelChild>();
+                process->held = true;
+                child = process.get();
+                return process;
+            },
+            1, 32);
+        auto blocker = submitDecode(pool, openSource(QByteArray("blocker")).fd, {}, [](Decoded) {});
+        QCOMPARE(blocker.status, Pool::Admission::Accepted);
+        ImagePipeline pipeline(pool);
+        QList<int> delivered;
+        QStringList errors;
+        const auto record = [&](int id, bool visible) {
+            return pipeline.request(
+                SourceInput(QByteArray::number(id)), {DecodeSpec::Pixels, {8, 4}},
+                [&, id](Asset, Failure error) {
+                    delivered.append(id);
+                    errors.append(error.code);
+                },
+                visible);
+        };
+        auto hidden = record(1, false);
+        auto promoted = record(2, false);
+        auto visible = record(3, true);
+        auto cancelled = record(4, true);
+        QCoreApplication::sendPostedEvents(&pipeline, QEvent::MetaCall);
+        QCOMPARE(pipeline.submissions(), 0u);
+        pipeline.setVisible(promoted, true);
+        cancelled.reset();
+        child->release();
+        QTRY_COMPARE(delivered.size(), 3);
+        QCOMPARE(delivered, (QList<int>{2, 3, 1}));
+        QCOMPARE(errors,
+                 (QStringList{"unsupported-format", "unsupported-format", "unsupported-format"}));
+        QCOMPARE(pipeline.submissions(), 3u);
+    }
+
+    void queueDeadline() {
+        Pool pool(
+            [] {
+                auto process = std::make_unique<PixelChild>();
+                process->held = true;
+                return process;
+            },
+            1, 32);
+        QCOMPARE(
+            submitDecode(pool, openSource(QByteArray("blocker")).fd, {}, [](Decoded) {}).status,
+            Pool::Admission::Accepted);
+        QSignalSpy releases(&pool, &Pool::capacityReleased);
+        ImagePipeline pipeline(pool, nullptr, 100);
+        Failure failure;
+        auto interest =
+            pipeline.request(SourceInput(QByteArray("wait")), {DecodeSpec::Pixels, {8, 4}},
+                             [&](Asset, Failure error) { failure = std::move(error); });
+        QTRY_VERIFY(failure);
+        QCOMPARE(failure.stage, "admission");
+        QCOMPARE(failure.code, "deadline");
+        QCOMPARE(releases.size(), 0);
+        QCOMPARE(pipeline.submissions(), 0u);
+    }
+
     void immutableRevision() {
         QTemporaryDir dir;
         QVERIFY(dir.isValid());

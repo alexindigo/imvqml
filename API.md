@@ -103,14 +103,23 @@ means temporarily busy; retry with backoff. `-3` signals ticket exhaustion.
 Negative admissions do not emit `finished`.
 Provider and encoded jobs use the same end-to-end admission budget. An
 admitted export occupies its slot through encoding and publication. Encoded
-source preparation is asynchronous, and display and thumbnail requests may
-report `busy` during saturation.
+source preparation is asynchronous. Only `ImvImageJob` exposes busy (`-2`).
+
+`ImvImage` remains `Loading` while waiting for admission. Visible items go
+first; within each priority, pending requests go in arrival order. Source
+replacement, a resize that changes the requested decode size, or item
+destruction withdraws the old request. The pipeline holds at most 128
+requests and gives queued preparation and helper admission eight seconds;
+overflow or expiry reports `admission/deadline`, not `busy`. Helper execution
+has its own deadline after admission. Video frame sources follow the same
+rules. `ImvCache.exportThumbnail` uses background decode priority and a
+separate bounded writer wait; writer overflow or expiry is `store/deadline`.
 
 The process pool is private. Its capacity pressure is retryable admission
 (`Busy`), not a terminal error. Process outcomes carry `stage: "helper"`
 and one of `deadline`, `helper-crashed`, `protocol-error`, or `cancelled`.
-Other codes: `admission` (`invalid-size`, `invalid-position`, `invalid-source`,
+Other codes: `admission` (`deadline`, `invalid-size`, `invalid-position`, `invalid-source`,
 `invalid-destination`, `too-large`, `output-failed`), `open` (`unreadable`),
 `inspect` (`unsupported-format`, `invalid-image`, `too-large`), `decode`
-(`invalid-image`, `output-failed`) and `store` (`already-exists`,
+(`invalid-image`, `output-failed`) and `store` (`already-exists`, `deadline`,
 `write-failed`). Treat diagnostics as plain text, not markup.

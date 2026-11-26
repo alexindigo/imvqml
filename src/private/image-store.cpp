@@ -139,6 +139,9 @@ ImageStore::ImageStore(QByteArray version, QObject *parent)
     d->version = std::move(version);
     m_worker.setMaxThreadCount(1);
     m_worker.setExpiryTimeout(-1);
+    m_thumbnailDeadline.setSingleShot(true);
+    m_thumbnailDeadline.setTimerType(Qt::PreciseTimer);
+    connect(&m_thumbnailDeadline, &QTimer::timeout, this, &ImageStore::pumpThumbnails);
 }
 
 ImageStore::~ImageStore() {
@@ -310,70 +313,115 @@ QString thumbnailBucket(int size) {
 }
 
 void ImageStore::thumbnail(QString path, struct stat before, QImage pixels, SourceInfo info,
-                           int size, std::function<void(Failure, QUrl)> done) {
-    if (!m_pixelWrites.tryAcquire()) {
-        QMetaObject::invokeMethod(
-            this,
-            [done = std::move(done)] {
-                done({"store", "busy", "Thumbnail writer queue is full"}, {});
-            },
-            Qt::QueuedConnection);
+                           int size, std::weak_ptr<void> interest,
+                           std::function<void(Failure, QUrl)> done) {
+    constexpr int WaitMs = 8000;
+    constexpr int QueueLimit = 64;
+    pumpThumbnails();
+    Thumbnail request{std::move(path),
+                      before,
+                      std::move(pixels),
+                      std::move(info),
+                      size,
+                      std::move(interest),
+                      std::move(done),
+                      QDeadlineTimer(WaitMs, Qt::PreciseTimer)};
+    if (m_thumbnails.size() >= QueueLimit) {
+        finishThumbnail(std::move(request),
+                        {"store", "deadline", "Thumbnail writer queue is full"});
         return;
     }
-    m_worker.start([this, permit = QSemaphoreReleaser(m_pixelWrites), path = std::move(path),
-                    before, pixels = std::move(pixels), info = std::move(info), size,
-                    done = std::move(done)]() mutable {
-        const auto produce = [&]() -> QUrl {
-            struct stat current{};
-            const auto directoryKey = thumbnailBucket(size);
-            if (directoryKey.isEmpty() || pixels.isNull())
-                return {};
-            auto base = qEnvironmentVariable("XDG_CACHE_HOME");
-            if (!QDir::isAbsolutePath(base))
-                base = QDir::home().filePath(".cache");
-            const auto thumbnails = QDir(base).filePath("thumbnails");
-            const auto directory = QDir(thumbnails).filePath(directoryKey);
-            if (!privateDirectory(thumbnails) || !privateDirectory(directory))
-                return {};
-            const auto uri = QUrl::fromLocalFile(path).toEncoded();
-            const auto name = QString::fromLatin1(
-                                  QCryptographicHash::hash(uri, QCryptographicHash::Md5).toHex()) +
-                              ".png";
-            if (QDir(thumbnails).relativeFilePath(path).startsWith("../") == false)
-                return {};
-            const auto output = QDir(directory).filePath(name);
-            pixels.setText("Thumb::URI", QString::fromUtf8(uri));
-            pixels.setText("Thumb::MTime", QString::number(before.st_mtim.tv_sec));
-            pixels.setText("Thumb::Size", QString::number(before.st_size));
-            pixels.setText("Thumb::Image::Width", QString::number(info.size.width()));
-            pixels.setText("Thumb::Image::Height", QString::number(info.size.height()));
-            if (info.format == "svg")
-                pixels.setText("Thumb::Mimetype", "image/svg+xml");
-            else if (info.format == "heif" || info.format == "avif" || info.format == "jxl" ||
-                     info.format == "webp" || info.format == "jpeg" || info.format == "gif" ||
-                     info.format == "tiff" || info.format == "png")
-                pixels.setText("Thumb::Mimetype", "image/" + info.format);
-            pixels.setText("Software", "imvqml");
-            QSaveFile file(output);
-            if (!file.open(QIODevice::WriteOnly) ||
-                !file.setPermissions(QFile::ReadOwner | QFile::WriteOwner) ||
-                !pixels.save(&file, "PNG") ||
-                ::stat(QFile::encodeName(path).constData(), &current) || !same(before, current) ||
-                !file.commit())
-                return {};
-            return QUrl::fromLocalFile(output);
-        };
-        const auto result = produce();
-        QMetaObject::invokeMethod(
-            this,
-            [done = std::move(done), result] {
-                done(result.isEmpty() ? Failure{"store", "write-failed",
-                                                "Could not publish freedesktop thumbnail"}
-                                      : Failure{},
-                     result);
+    m_thumbnails.append(std::move(request));
+    pumpThumbnails();
+}
+
+void ImageStore::finishThumbnail(Thumbnail request, Failure failure, QUrl output) {
+    QMetaObject::invokeMethod(
+        this,
+        [interest = std::move(request.interest), done = std::move(request.done),
+         failure = std::move(failure), output = std::move(output)] {
+            if (!interest.expired())
+                done(failure, output);
+        },
+        Qt::QueuedConnection);
+}
+
+void ImageStore::pumpThumbnails() {
+    m_thumbnails.removeIf([](const Thumbnail &request) { return request.interest.expired(); });
+    const Failure deadline{"store", "deadline", "Thumbnail writer admission deadline expired"};
+    while (!m_thumbnails.isEmpty() && m_thumbnails.first().deadline.hasExpired())
+        finishThumbnail(m_thumbnails.takeFirst(), deadline);
+    if (!m_writingThumbnail && !m_thumbnails.isEmpty()) {
+        m_writingThumbnail = true;
+        m_worker.start(
+            [this, request = m_thumbnails.takeFirst(), deadline]() mutable {
+                auto &[path, before, pixels, info, size, interest, done, timer] = request;
+                const auto failure = timer.hasExpired() ? deadline : Failure{};
+                const auto produce = [&]() -> QUrl {
+                    struct stat current{};
+                    const auto directoryKey = thumbnailBucket(size);
+                    if (directoryKey.isEmpty() || pixels.isNull())
+                        return {};
+                    auto base = qEnvironmentVariable("XDG_CACHE_HOME");
+                    if (!QDir::isAbsolutePath(base))
+                        base = QDir::home().filePath(".cache");
+                    const auto thumbnails = QDir(base).filePath("thumbnails");
+                    const auto directory = QDir(thumbnails).filePath(directoryKey);
+                    if (!privateDirectory(thumbnails) || !privateDirectory(directory))
+                        return {};
+                    const auto uri = QUrl::fromLocalFile(path).toEncoded();
+                    const auto name =
+                        QString::fromLatin1(
+                            QCryptographicHash::hash(uri, QCryptographicHash::Md5).toHex()) +
+                        ".png";
+                    if (QDir(thumbnails).relativeFilePath(path).startsWith("../") == false)
+                        return {};
+                    const auto output = QDir(directory).filePath(name);
+                    pixels.setText("Thumb::URI", QString::fromUtf8(uri));
+                    pixels.setText("Thumb::MTime", QString::number(before.st_mtim.tv_sec));
+                    pixels.setText("Thumb::Size", QString::number(before.st_size));
+                    pixels.setText("Thumb::Image::Width", QString::number(info.size.width()));
+                    pixels.setText("Thumb::Image::Height", QString::number(info.size.height()));
+                    if (info.format == "svg")
+                        pixels.setText("Thumb::Mimetype", "image/svg+xml");
+                    else if (info.format == "heif" || info.format == "avif" ||
+                             info.format == "jxl" || info.format == "webp" ||
+                             info.format == "jpeg" || info.format == "gif" ||
+                             info.format == "tiff" || info.format == "png")
+                        pixels.setText("Thumb::Mimetype", "image/" + info.format);
+                    pixels.setText("Software", "imvqml");
+                    QSaveFile file(output);
+                    if (!file.open(QIODevice::WriteOnly) ||
+                        !file.setPermissions(QFile::ReadOwner | QFile::WriteOwner) ||
+                        !pixels.save(&file, "PNG") ||
+                        ::stat(QFile::encodeName(path).constData(), &current) ||
+                        !same(before, current) || interest.expired() || !file.commit())
+                        return {};
+                    return QUrl::fromLocalFile(output);
+                };
+                const auto result = !failure && !interest.expired() ? produce() : QUrl{};
+                QMetaObject::invokeMethod(
+                    this,
+                    [this, request = std::move(request), failure, result]() mutable {
+                        m_writingThumbnail = false;
+                        finishThumbnail(std::move(request),
+                                        failure ? failure
+                                        : result.isEmpty()
+                                            ? Failure{"store", "write-failed",
+                                                      "Could not publish freedesktop thumbnail"}
+                                            : Failure{},
+                                        result);
+                        pumpThumbnails();
+                    },
+                    Qt::QueuedConnection);
             },
-            Qt::QueuedConnection);
-    });
+            1);
+    }
+    if (m_thumbnails.isEmpty())
+        m_thumbnailDeadline.stop();
+    else
+        m_thumbnailDeadline.start(
+            int(qMax<qint64>(1, m_thumbnails.first().deadline.remainingTime())));
 }
 
 ImageStore &imageStore() {

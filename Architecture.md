@@ -62,9 +62,19 @@ single cancellation/publication gate precedes `linkat` no-clobber commit.
 
 `ImvImage` adapts sources and snapshots physical bounds and fill intent. The
 GUI-affine pipeline keys requests by source revision (file stat including
-ctime, or digest of immutable owned bytes) and the encoded decode spec. It
-coalesces waiting and submitted decodes, queues behind pool capacity, and
-revokes delivery interest independently of helper retirement. A generation
+ctime, or digest of immutable owned bytes) and the encoded decode spec. A
+bounded pipeline queue owns requests before source preparation through helper
+admission. It selects visible items first, then FIFO within a priority, and
+uses current visibility while requests wait. Source preparation reserves room
+against idle helpers rather than pre-staging a backlog of sealed snapshots;
+promotion does not interrupt a preparation or decode already in flight.
+Source and helper capacity release wake the dispatcher. Queued admission has
+an eight-second monotonic deadline, separate from the helper's execution timer;
+an animation classification reply opens a fresh admission window for pixels.
+Queue overflow is an admission deadline, not Busy. After source identity is
+known, matching work coalesces and the last listener's withdrawal drops queued
+work or cancels an admitted ticket. Withdrawal is independent of helper
+retirement. A generation
 guards decode delivery and each presentation revision tracks its texture
 outcome separately. A failed update can keep the last valid texture for the
 same source; a successful replacement recovers the item. The pipeline's result index
@@ -109,6 +119,8 @@ The decoder reparses the encoded source as needed; decoded pixels do not
 grow with the frame count. Timers own delay, loop and pause state; the item
 passes visibility and play intent. Paused streams retire their helper and
 lookahead after a grace period; they do not take still-pool capacity.
+Lookahead waits for its playback pool's capacity release rather than reporting
+Busy.
 
 ## Persistent store
 
@@ -126,7 +138,10 @@ under a short directory lock; LRU eviction skips live asset leases.
 Freedesktop thumbnails are explicit first-frame jobs. The store worker
 encodes trusted output to a PNG in the requested standard bucket, including
 thumbnail URI and modification metadata. The private cache and the shared
-thumbnail directories have separate ownership and deletion paths.
+thumbnail directories have separate ownership and deletion paths. The writer
+has a bounded FIFO of explicit exports with its own admission deadline and
+weak caller interest. Optional pixel-cache publication cannot consume that
+queue; it remains best effort under pressure.
 
 ## Optional video
 
@@ -137,7 +152,8 @@ native command reply and the load or seek event followed by playback restart.
 The software renderer sees unrotated input; the helper uses source metadata
 to orient pixels before publishing the same sealed RGBA result as stills.
 The application does not link libmpv or mpvqml. The helper-pool deadline and
-crash boundary also apply to native initialization and teardown.
+crash boundary also apply to native initialization and teardown. Display video
+frames share the same queued admission as still images.
 
 ## Installation boundary
 

@@ -42,7 +42,7 @@ struct Presentation {
     QRgb tint;
     bool smooth;
 
-    bool needsRaster() const { return mask != ImvImage::NoMask || tint != 0; }
+    bool needsRaster() const { return mask != ImvImage::NoMask; }
 
     QByteArray key(const Asset &asset) const {
         QByteArray bytes;
@@ -54,20 +54,25 @@ struct Presentation {
     }
 
     QImage image(const QImage &pixels) const {
-        if (!needsRaster())
+        if (!needsRaster() && !tint)
             return pixels;
-        if (!rgbaBytes(raster))
+        const QSize output = needsRaster() ? raster : pixels.size();
+        if (!rgbaBytes(output))
             return {};
-        QImage result(raster, QImage::Format_ARGB32_Premultiplied);
+        QImage result(output, QImage::Format_ARGB32_Premultiplied);
         if (result.isNull())
             return {};
         result.fill(Qt::transparent);
         QPainter painter(&result);
-        painter.scale(raster.width() / size.width(), raster.height() / size.height());
-        painter.setRenderHint(QPainter::SmoothPixmapTransform, smooth);
-        const auto placement = layoutImage(size, pixels.size(), fill);
-        painter.drawImage(placement.target, pixels, placement.source);
-        const QRectF box(QPointF{}, size);
+        const QRectF box(QPointF{}, needsRaster() ? size : QSizeF(output));
+        if (needsRaster()) {
+            painter.scale(raster.width() / size.width(), raster.height() / size.height());
+            painter.setRenderHint(QPainter::SmoothPixmapTransform, smooth);
+            const auto placement = layoutImage(size, pixels.size(), fill);
+            painter.drawImage(placement.target, pixels, placement.source);
+        } else {
+            painter.drawImage(QPoint(0, 0), pixels);
+        }
         if (tint) {
             // Opaque tint replaces RGB while preserving the fitted image's alpha.
             painter.setCompositionMode(QPainter::CompositionMode_SourceIn);

@@ -22,6 +22,7 @@ private slots:
     void transientAsyncProviderJob();
     void masks();
     void alphaTint();
+    void tintGeometry();
     void firstFramePreview();
     void animation();
     void cachePolicy();
@@ -426,6 +427,57 @@ void ItemTest::alphaTint() {
     QCOMPARE(Imv::imagePipeline().submissions(), decodes);
     QCOMPARE(item.status(), Imv::ImvImage::Ready);
     qInfo() << "graphics API" << window.rendererInterface()->graphicsApi();
+}
+
+void ItemTest::tintGeometry() {
+    QQuickWindow window;
+    window.resize(96, 96);
+    window.setColor(Qt::black);
+    Imv::ImvImage item(window.contentItem());
+    item.setSize({96, 90});
+    item.setSmooth(false);
+    QImage source(96, 64, QImage::Format_RGBA8888);
+    source.fill(Qt::red);
+    for (int y = 0; y < 64; ++y) {
+        for (int x = 32; x < 96; ++x)
+            source.setPixelColor(x, y, QColor(255, 0, 0, x < 64 ? 128 : 0));
+    }
+    QBuffer encoded;
+    QVERIFY(encoded.open(QIODevice::WriteOnly));
+    QVERIFY(source.save(&encoded, "PNG"));
+    item.setBytes(encoded.data());
+    item.setTint(Qt::green);
+    window.show();
+    QTRY_COMPARE(item.status(), Imv::ImvImage::Ready);
+    const auto sample = [&] {
+        const auto frame = window.grabWindow();
+        if (frame.isNull())
+            return QString("no frame");
+        // grabWindow metadata differs across render loops; measure its raster.
+        const auto xScale = qreal(frame.width()) / window.width();
+        const auto yScale = qreal(frame.height()) / window.height();
+        const auto at = [&](int x, int y) {
+            return frame.pixelColor(qRound(x * xScale), qRound(y * yScale)).name();
+        };
+        return QString("%1 %2 %3 %4 %5 %6")
+            .arg(at(16, 10), at(16, 14), at(2, 20), at(16, 48), at(48, 48), at(80, 48));
+    };
+    const QString contained("#000000 #000000 #00ff00 #00ff00 #008000 #000000");
+    QTRY_COMPARE(sample(), QString("#000000 #00ff00 #00ff00 #00ff00 #008000 #000000"));
+    const auto uploads = Imv::textureUploads();
+    const auto decodes = Imv::imagePipeline().submissions();
+    item.setHeight(96); // Within decode hysteresis; layout still changes.
+    QTRY_COMPARE(sample(), contained);
+    QCOMPARE(Imv::textureUploads(), uploads);
+    item.setMask(Imv::ImvImage::Circle);
+    QTRY_COMPARE(sample(), QString("#000000 #000000 #000000 #00ff00 #008000 #000000"));
+    item.setMask(Imv::ImvImage::NoMask);
+    QTRY_COMPARE(sample(), contained);
+    QCOMPARE(Imv::imagePipeline().submissions(), decodes);
+    item.setTint(Qt::transparent);
+    QTRY_COMPARE(sample(), QString("#000000 #000000 #ff0000 #ff0000 #800000 #000000"));
+    qInfo() << "graphics API" << window.rendererInterface()->graphicsApi() << "effective DPR"
+            << window.effectiveDevicePixelRatio();
 }
 
 void ItemTest::firstFramePreview() {

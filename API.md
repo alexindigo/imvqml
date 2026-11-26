@@ -36,6 +36,9 @@ not the pixels returned or exported by a job.
 Tint works the same way on both renderers. A tint with nonzero alpha supplies
 RGB only; it does not change image opacity. Changing tint redraws the item
 without decoding again or changing the pixels stored in the disk cache.
+Tint alone is applied at decoded-frame size before the normal texture layout
+and sampling. When a mask is active, both are applied in its physical-size
+raster, bounded by the same output edge limit.
 
 The request size is the item size times the window DPR, rounded up. Per-edge
 resize jitter below the greater of 4 physical pixels and one eighth of the

@@ -4,6 +4,7 @@
 
 #include <QCryptographicHash>
 #include <QFile>
+#include <QLockFile>
 #include <QtTest>
 #include <sys/stat.h>
 
@@ -91,6 +92,54 @@ private slots:
         struct stat bits{};
         QVERIFY(::stat(QFile::encodeName(path).constData(), &bits) == 0);
         QCOMPARE(bits.st_mode & 0777u, 0600u);
+    }
+
+    void contendedInvalidation_data() {
+        QTest::addColumn<bool>("all");
+        QTest::newRow("single source") << false;
+        QTest::newRow("clear all") << true;
+    }
+
+    void contendedInvalidation() {
+        QFETCH(bool, all);
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        ImageStore store("version");
+        const DecodeSpec spec{DecodeSpec::Pixels, {8, 8}};
+        QImage pixels(8, 8, QImage::Format_RGBA8888);
+        pixels.fill(Qt::red);
+        const Decoded value{{"png", {8, 8}, 1, 1}, pixels, {}};
+        const auto input = [](char byte) { return openSource(QByteArray(1, byte)).fd; };
+        ImageStore::Lookup a, b;
+        store.configure(directory.path(), 4096, true);
+        store.lookup(input('a'), spec, [&](ImageStore::Lookup r) { a = std::move(r); });
+        store.lookup(input('b'), spec, [&](ImageStore::Lookup r) { b = std::move(r); });
+        QTRY_VERIFY(a.lease && b.lease);
+        store.publish(a, input('a'), value);
+        store.publish(b, input('b'), value);
+        QTRY_VERIFY(QFileInfo::exists(a.path) && QFileInfo::exists(b.path));
+
+        QLockFile other(QDir(directory.path()).filePath(".imvqml.lock"));
+        QVERIFY(other.tryLock(0));
+        if (all)
+            store.clear();
+        else
+            store.invalidate(input('a'));
+        // An observed lookup is a barrier behind the locked invalidation;
+        // release the other owner's lock only after that operation has run.
+        bool settled = false;
+        store.lookup(input('a'), spec, [&](ImageStore::Lookup) { settled = true; });
+        QTRY_VERIFY(settled);
+        other.unlock();
+
+        std::optional<bool> staleA, staleB;
+        store.lookup(input('a'), spec, [&](ImageStore::Lookup r) { staleA = bool(r.value); });
+        store.lookup(input('b'), spec, [&](ImageStore::Lookup r) { staleB = bool(r.value); });
+        QTRY_VERIFY(staleA.has_value() && staleB.has_value());
+        QCOMPARE(*staleA, false);
+        QCOMPARE(*staleB, !all);
+        QVERIFY(!QFileInfo::exists(a.path));
+        QCOMPARE(QFileInfo::exists(b.path), !all);
     }
 
     void evictionHonorsLease() {

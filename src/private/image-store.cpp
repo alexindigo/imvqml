@@ -11,6 +11,7 @@
 #include <QPointer>
 #include <QRegularExpression>
 #include <QSaveFile>
+#include <QSet>
 #include <cerrno>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -78,6 +79,32 @@ struct ImageStore::Worker {
     QByteArray version;
     quint64 epoch = 1;
     QHash<QString, std::weak_ptr<const QString>> leases;
+    QHash<QString, QSet<QByteArray>> invalidations;
+
+    // Called under the cross-process directory lock, before reading or writing
+    // any cache entries. An empty fingerprint marks the whole directory.
+    void flushInvalidations() {
+        auto pending = invalidations.find(directory);
+        if (pending == invalidations.end() || !QDir(directory).isReadable())
+            return;
+        QSet<QByteArray> failed;
+        for (const auto &file : entries(directory)) {
+            const auto fingerprint = file.fileName().first(64).toLatin1();
+            if ((pending->contains(QByteArray{}) || pending->contains(fingerprint)) &&
+                !QFile::remove(file.filePath()) && QFileInfo::exists(file.filePath()))
+                failed.insert(fingerprint);
+        }
+        if (failed.isEmpty())
+            invalidations.erase(pending);
+        else
+            *pending = std::move(failed);
+    }
+
+    bool invalidated(const QByteArray &fingerprint) const {
+        const auto pending = invalidations.constFind(directory);
+        return pending != invalidations.cend() &&
+               (pending->contains(QByteArray{}) || pending->contains(fingerprint));
+    }
 
     Lease acquire(const QString &path) {
         leases.removeIf([](const auto &item) { return item.value().expired(); });
@@ -129,8 +156,10 @@ void ImageStore::configure(QString directory, qint64 budget, bool enabled) {
             d->enabled = enabled;
             if (enabled && privateDirectory(directory)) {
                 QLockFile lock(QDir(directory).filePath(".imvqml.lock"));
-                if (lock.tryLock(0))
+                if (lock.tryLock(0)) {
+                    d->flushInvalidations();
                     d->makeSpace(0);
+                }
             }
         });
 }
@@ -155,8 +184,11 @@ void ImageStore::lookup(Fd input, DecodeSpec spec, std::function<void(Lookup)> d
                     result.lease = d->acquire(result.path);
                     QLockFile lock(QDir(d->directory).filePath(".imvqml.lock"));
                     if (lock.tryLock(0)) {
-                        const Fd fd(::open(QFile::encodeName(result.path).constData(),
-                                           O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW));
+                        d->flushInvalidations();
+                        const Fd fd(d->invalidated(result.fingerprint)
+                                        ? -1
+                                        : ::open(QFile::encodeName(result.path).constData(),
+                                                 O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW));
                         QFile file;
                         struct stat stat{};
                         if (fd && !::fstat(fd.get(), &stat) && S_ISREG(stat.st_mode) &&
@@ -195,7 +227,10 @@ void ImageStore::publish(Lookup lookup, Fd input, Decoded decoded) {
             if (data.isEmpty())
                 return;
             QLockFile lock(QDir(d->directory).filePath(".imvqml.lock"));
-            if (!lock.tryLock(0) || !d->makeSpace(data.size(), lookup.path))
+            if (!lock.tryLock(0))
+                return;
+            d->flushInvalidations();
+            if (d->invalidated(lookup.fingerprint) || !d->makeSpace(data.size(), lookup.path))
                 return;
             QSaveFile file(lookup.path);
             if (file.open(QIODevice::WriteOnly) &&
@@ -213,14 +248,20 @@ void ImageStore::invalidate(Fd input) {
         if (d->directory.isEmpty() || !QFileInfo::exists(d->directory))
             return;
         const auto fingerprint = input ? digest(input) : QByteArray{};
-        if (input && fingerprint.isEmpty())
+        if (input && fingerprint.isEmpty()) {
+            qWarning("imvqml: Could not identify source for cache invalidation");
             return;
+        }
+        auto &pending = d->invalidations[d->directory];
+        if (fingerprint.isEmpty())
+            pending.clear();
+        if (!pending.contains(QByteArray{}))
+            pending.insert(fingerprint);
         QLockFile lock(QDir(d->directory).filePath(".imvqml.lock"));
-        if (lock.tryLock(0))
-            for (const auto &file : entries(d->directory))
-                if (fingerprint.isEmpty() ||
-                    file.fileName().startsWith(QString::fromLatin1(fingerprint)))
-                    QFile::remove(file.filePath());
+        if (lock.tryLock(200))
+            d->flushInvalidations();
+        if (d->invalidations.contains(d->directory))
+            qWarning("imvqml: Cache invalidation pending; affected entries will not be reused");
     });
 }
 

@@ -5,9 +5,112 @@ directory to the QML import path (replace `lib` with CMake's install libdir).
 C++ consumers use `find_package(imvqml 0.1 CONFIG REQUIRED)` and link
 `imvqml::imvqml`; the header is `<imvqml/imvimagejob.h>`.
 
-`ImvImageJob` is a non-visual QObject and needs no display or window.
-In this scaffold, `sample(source, maxWidth, maxHeight)` admits a nonempty
-URL and positive dimensions, returning a positive ticket, or rejects
-immediately with `-1`. Each ticket gets one queued `finished(id, result)`
-while the receiver exists. The scaffold reports `stage: "decode"`,
-`code: "not-implemented"` and a diagnostic `detail`; it does not decode.
+## Display item
+
+`ImvImage` (`<imvqml/imvimage.h>` in C++) is a Qt Quick item. Set its
+width and height explicitly or with anchors. Its `source` is a path, local
+`file:` URL, `data:` URL, or `image://provider/id`; `setBytes(bytes)` replaces
+the URL with owned encoded bytes. Network URLs are rejected. Qt image
+providers must return CPU-readable pixels; a GPU-only texture is not a byte
+source. Provider sources are snapshotted when assigned. Synchronous providers
+are called on the GUI thread for their native-size pixels; async provider
+pixels are copied as soon as the response arrives. Resizing or changing fill
+mode uses the snapshot, not a new provider request. No new codec runs in the
+application for providers.
+
+| Property | Behavior |
+|---|---|
+| `fillMode` | `ImvImage.Contain` (default), `Cover` (center crop), or `Stretch` |
+| `mask`, `radius` | `NoMask` (default), `Circle` (inscribed), or `Rounded` with a radius in logical pixels |
+| `tint` | Replaces the displayed RGB with this color and preserves the source alpha. `"transparent"` (default) disables tint. |
+| `smooth` | Inherited Qt Quick texture filtering, true by default |
+| `status` | `Idle` for no source, `Loading` awaiting size/decode/texture, `Ready` after scene-graph texture creation, or `Failed` |
+| `sourceInfo` | `format`, oriented `width` and `height`, `frames`, `loop`; empty before an accepted result |
+| `errorStage`, `errorCode`, `errorDetail` | The same failure vocabulary as jobs, plus `upload/texture-failed` |
+
+Circle and rounded masks use antialiased pixel alpha in both the default and
+software Qt Quick renderers. The circle is centered and inscribed in the item;
+a rounded mask with radius zero is rectangular. Masking affects display only,
+not the pixels returned or exported by a job.
+
+Tint works the same way on both renderers. A tint with nonzero alpha supplies
+RGB only; it does not change image opacity. Changing tint redraws the item
+without decoding again or changing the pixels stored in the disk cache.
+Tint alone is applied at decoded-frame size before the normal texture layout
+and sampling. When a mask is active, both are applied in its physical-size
+raster, bounded by the same output edge limit.
+
+The request size is the item size times the window DPR, rounded up. Per-edge
+resize jitter below the greater of 4 physical pixels and one eighth of the
+previous requested edge reuses the prior decode. Old pixels can stay visible
+during a resize but are dropped on source or fill-mode changes.
+
+`animate` and `playing` default to true. Set `animate: false` for a first-frame
+view; set `playing: false` to pause at the current frame. Hiding the item or
+its window pauses playback and releases an idle streaming helper after 400 ms.
+Showing it again resumes at the playhead if `playing` is still true. Finite
+animations stop on the final frame. Multi-page images with no frame timing
+stay on their first page. Image jobs always select the first frame.
+
+Recognized local video containers (MP4/MOV, Matroska/WebM, AVI, and Ogg)
+use a single captured frame, not playback. `ImvImage.videoPosition` and the
+optional final `videoPosition` argument of `sample` and `render` select a
+fraction from 0 (first frame) to 1 (near the end) when duration is known.
+`sourceInfo.format` is `video` with oriented dimensions and one frame.
+When compatible libmpv is unavailable, video yields
+`inspect/unsupported-format` with `detail: "video-support-unavailable"`.
+
+## Cache policy and thumbnails
+
+`ImvCache` (`<imvqml/imvcache.h>` in C++) has process-wide policy:
+`enabled` (default false), `directory` (an absolute local path; default
+`$XDG_CACHE_HOME/imvqml` or `~/.cache/imvqml`), and `byteBudget` (512 MiB).
+`clear()` clears the store; `invalidate(source)` removes entries for the
+current contents of a local file or data URL. Both affect subsequent display
+requests without clearing pixels from live items. Store misses or corrupt
+entries fall back to the decoder. The store never fetches a network source.
+
+`exportThumbnail(source, size = 128)` is an explicit local-file export, even
+if the private pixel store is off. `size` selects one of the freedesktop
+buckets: 128, 256, 512, or 1024. A positive ticket yields
+`thumbnailFinished(id, result)` with `stage`, `code`, `detail`, and on success
+`destination`. The output is an atomic PNG with original URI and mtime.
+
+## Image jobs
+
+`ImvImageJob` needs no display or window. Its methods accept local paths,
+local `file:` URLs, and percent-encoded or base64 `data:` URLs. Jobs associated
+with a QML engine also accept `image://provider/id` and snapshot the source at
+call time, or on arrival for an async response. Jobs never fetch network URLs.
+Uncompressed output edges must be 1 to 8192 pixels.
+
+| Method | Successful result |
+|---|---|
+| `inspect(source)` | `sourceInfo` with `format`, oriented `width` and `height`, `frames`, `loop` (0 means infinite) |
+| `sample(source, maxWidth, maxHeight, videoPosition = 0)` | `sourceInfo`, fitted `width` and `height`, and owned packed unpremultiplied RGBA8 `rgba` (QML `ArrayBuffer`) |
+| `render(source, maxWidth, maxHeight, destination, format = "png", videoPosition = 0)` | `sourceInfo`, fitted `width` and `height`, and a published local file; `format` is `png` or `webp` (lossless) |
+
+Sample and render select the first image frame and do not upscale. Render needs an
+existing staging directory and an unused destination on a filesystem that
+supports same-directory hard links. It never replaces a name. `cancel(id)`
+returns false if the ticket is gone or atomic publication has begun; if it
+returns true, the job cannot publish its output.
+
+A positive ticket is local admission. `finished(id, result)` is delivered
+once, queued, while the receiver exists. The result always includes `stage`,
+`code`, `detail`; success is `complete` with empty code and detail. `-2`
+means temporarily busy; retry with backoff. `-3` signals ticket exhaustion.
+Negative admissions do not emit `finished`.
+Provider and encoded jobs use the same end-to-end admission budget. An
+admitted export occupies its slot through encoding and publication. Encoded
+source preparation is asynchronous, and display and thumbnail requests may
+report `busy` during saturation.
+
+The process pool is private. Its capacity pressure is retryable admission
+(`Busy`), not a terminal error. Process outcomes carry `stage: "helper"`
+and one of `deadline`, `helper-crashed`, `protocol-error`, or `cancelled`.
+Other codes: `admission` (`invalid-size`, `invalid-position`, `invalid-source`,
+`invalid-destination`, `too-large`, `output-failed`), `open` (`unreadable`),
+`inspect` (`unsupported-format`, `invalid-image`, `too-large`), `decode`
+(`invalid-image`, `output-failed`) and `store` (`already-exists`,
+`write-failed`). Treat diagnostics as plain text, not markup.

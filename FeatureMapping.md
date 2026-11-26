@@ -2,6 +2,14 @@
 
 | Owner | Contract now | Proof |
 |---|---|---|
-| QML plugin / CMake package | Separate import and link, relocated prefix | Independent no-display consumers with original trees hidden |
+| QML plugin / CMake package | Separate import and link, relocated prefix, local package metadata | Headless C++ and QML pixels and a Wayland QML item, with both original trees hidden; CPack archive inventory |
 | Private wire | Owned descriptors, typed length-framed request/reply, mock seam | `wire`: real helper, binary payload, descriptor echo, malformed frame and closure |
-| `ImvImageJob` | Headless type and queued ticket result; no decode yet | `installed-prefix`; opt-in `installed-pixels-red` checks real expected RGBA bytes and is red until decoding lands |
+| Private pool | Bounded admission, hard deadline, exactly-once outcome, cancel, crash recovery and bounded native reuse | `pool`: native kill/hang/garbage, wire correlation, injected cancel/reply ordering, reuse and destruction |
+| `ImvImageJob` | Headless inspect/sample/render, queued ticket result and no-clobber publication | `jobs`, `installed-sample`: metadata, actual output pixels, alpha, EXIF, error stages, cancellation and PNG/WebP publication |
+| libvips helper | Explicit loader set, bounded source and geometry, validated sealed pixels | `jobs`: nine format fixtures, blocked PPM/FITS, malformed and oversized inputs, recovery |
+| Persistent storage format | QOI, selected by timing before store implementation | [Measured comparison](tests/store-format.md), `imv-store-benchmark` |
+| `ImvImage` / private pipeline | Physical-size requests, owned sources, coalescing, cancellable interests and stale-delivery guards | `pipeline`: admitted cancellation and surviving shared interest; `items`: same-size coalescing, resize threshold, superseded source and provider/byte pixels |
+| Render-thread texture cache | Per-graph leases and byte-budgeted LRU | `items`: niri window pixels with one decode and one texture across two items, then reuse without a decode or texture creation |
+| Animation playback | Sealed small batches, dedicated streamed page helpers, bounded lookahead, delays, visibility and finite loops | `pipeline`: GIF/WebP delay metadata and pixels, large GIF ring, still availability and helper retirement/resume; `items`: two loops and paused/hidden window playback |
+| `ImvCache` / store | Versioned QOI entries, bounded worker-owned disk LRU, explicit policy and freedesktop PNG export | `store`: pixels without decoder submission, version/invalidation/corruption miss, live lease prevents eviction, thumbnail URI/mtime and pixels |
+| Optional libmpv helper adapter | Descriptor-only load, correlated seek and software capture with display rotation | `videos`: first/seek and 90/180/270 quadrant pixels; `video-native-fault`, `video-without-mpv`: helper crash recovery and genuinely absent runtime |

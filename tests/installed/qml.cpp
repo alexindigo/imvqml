@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: LGPL-3.0-only
+#include "probe.h"
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
@@ -17,8 +18,7 @@ int main(int argc, char **argv) {
     QQmlEngine engine;
     engine.addImportPath(QFile::decodeName(argv[1]));
     QQmlComponent component(&engine);
-    const QByteArray mode(argv[3]);
-    const bool pixels = mode == "ON" || mode == "SCAFFOLD";
+    const bool pixels = QByteArrayView(argv[3]) == "ON";
     auto prefix = QFile::decodeName(argv[2]).toUtf8();
     // No link to imvqml: QML must discover the dynamic plugin.
     QTemporaryDir fixtures(QDir::tempPath() + "/imv-fixture-XXXXXX");
@@ -68,21 +68,7 @@ int main(int argc, char **argv) {
         qCritical().noquote() << component.errorString();
         return 4;
     }
-    QFile mappings("/proc/self/maps");
-    if (!mappings.open(QIODevice::ReadOnly))
-        return 5;
-    // Read line by line: proc pseudo-files advertise a size of zero.
-    bool library = false, plugin = false;
-    for (;;) {
-        const auto line = mappings.readLine();
-        if (line.isEmpty())
-            break;
-        if (!line.contains(prefix + '/'))
-            continue;
-        library |= line.contains("/libimvqml.so.0.1.0");
-        plugin |= line.contains("/libimvqmlplugin.so");
-    }
-    if (!library || !plugin) {
+    if (!mappedFrom(prefix, true)) {
         qCritical("QML did not map the relocated plugin and backing library");
         return 6;
     }
@@ -93,13 +79,6 @@ int main(int argc, char **argv) {
     QObject::connect(&engine, &QQmlEngine::quit, &app, &QCoreApplication::quit);
     if (const int rc = app.exec(); rc != 0)
         return rc;
-    if (mode == "SCAFFOLD") {
-        return object->property("outcomeStage").toString() == "decode" &&
-                       object->property("outcomeCode").toString() == "not-implemented" &&
-                       !object->property("outcomeDetail").toString().isEmpty()
-                   ? 0
-                   : 9;
-    }
     if (!object->property("outcomeCode").toString().isEmpty() ||
         object->property("sampleWidth").toInt() != 2 ||
         object->property("sampleHeight").toInt() != 1 ||

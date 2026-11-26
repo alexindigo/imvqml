@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: LGPL-3.0-only
+cmake_minimum_required(VERSION 3.24)
+if(NOT IS_DIRECTORY "$ENV{TMPDIR}")
+    message(FATAL_ERROR "Set TMPDIR inside the disk-backed workspace")
+endif()
+set(work "$ENV{TMPDIR}/imvqml-package")
+file(MAKE_DIRECTORY "${work}")
+execute_process(COMMAND "@CMAKE_CPACK_COMMAND@" --config "@PROJECT_BINARY_DIR@/CPackConfig.cmake"
+    -B "${work}" -G TGZ -D CPACK_PACKAGE_FILE_NAME=imvqml-check
+    COMMAND_ERROR_IS_FATAL ANY)
+execute_process(COMMAND "${CMAKE_COMMAND}" -E tar tf "${work}/imvqml-check.tar.gz"
+    OUTPUT_VARIABLE inventory COMMAND_ERROR_IS_FATAL ANY)
+foreach(path IN ITEMS "@CMAKE_INSTALL_LIBEXECDIR@/imvqml-decoder"
+        "@CMAKE_INSTALL_LIBDIR@/libimvqml.so.@PROJECT_VERSION@"
+        "@qml_dir@/ImvQml/libimvqmlplugin.so" "@qml_dir@/ImvQml/qmldir"
+        "@CMAKE_INSTALL_LIBDIR@/cmake/imvqml/imvqmlConfig.cmake"
+        "@CMAKE_INSTALL_INCLUDEDIR@/imvqml/imvimage.h"
+        "@CMAKE_INSTALL_INCLUDEDIR@/imvqml/imvcache.h"
+        "@CMAKE_INSTALL_DOCDIR@/LICENSE" "@CMAKE_INSTALL_DOCDIR@/LICENSES/MIT.txt")
+    string(FIND "${inventory}" "imvqml-check/${path}\n" found)
+    if(found EQUAL -1)
+        message(FATAL_ERROR "Package omitted ${path}")
+    endif()
+endforeach()
+message(STATUS "Local imvqml archive contains the runtime, helper, QML and CMake metadata, headers and notices")
+file(ARCHIVE_EXTRACT INPUT "${work}/imvqml-check.tar.gz" DESTINATION "${work}")
+file(SHA256 "${work}/imvqml-check.tar.gz" archive_hash)
+message(STATUS "CPack probe archive SHA256 ${archive_hash}")
+execute_process(COMMAND "${CMAKE_COMMAND}" "-DARTIFACT_PREFIX=${work}/imvqml-check"
+    -DPIXELS=ON -P "@CMAKE_CURRENT_BINARY_DIR@/relocate.cmake" COMMAND_ERROR_IS_FATAL ANY)

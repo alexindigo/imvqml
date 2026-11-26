@@ -80,13 +80,13 @@ private slots:
     void containment() {
         const auto mode = qgetenv("IMV_VIDEO_TEST");
         if (mode.isEmpty())
-            QSKIP("Run by the missing-library and injected-native-fault tests");
+            QSKIP("Run by the missing-capability and injected-native-fault tests");
         Imv::ImvImageJob job;
         QSignalSpy done(&job, &Imv::ImvImageJob::finished);
         QVERIFY(job.sample(QUrl::fromLocalFile(IMV_FIXTURES "/seek.webm"), 128, 128) > 0);
         QTRY_COMPARE_WITH_TIMEOUT(done.size(), 1, 9000);
         const auto video = done.takeFirst().at(1).toMap();
-        if (mode == "missing") {
+        if (mode != "fault") {
             QCOMPARE(video.value("stage").toString(), "inspect");
             QCOMPARE(video.value("code").toString(), "unsupported-format");
             QCOMPARE(video.value("detail").toString(), "video-support-unavailable");
@@ -102,6 +102,18 @@ private slots:
         const auto image = done.first().at(1).toMap();
         QCOMPARE(image.value("stage").toString(), "complete");
         QCOMPARE(image.value("rgba").toByteArray().left(4), QByteArray::fromHex("ff0000ff"));
+    }
+
+    void invalidMedia() {
+        Imv::ImvImageJob job;
+        QSignalSpy done(&job, &Imv::ImvImageJob::finished);
+        // Matroska magic but no playable stream. The real backend has
+        // already started before the media transaction fails.
+        QVERIFY(job.sample(QUrl("data:;base64,GkXfowAAAAAAAAAAAAAAAAAAAAA="), 128, 128) > 0);
+        QTRY_COMPARE_WITH_TIMEOUT(done.size(), 1, 9000);
+        const auto result = done.first().at(1).toMap();
+        QCOMPARE(result.value("stage").toString(), "decode");
+        QCOMPARE(result.value("code").toString(), "invalid-image");
     }
 };
 

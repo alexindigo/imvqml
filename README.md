@@ -62,9 +62,11 @@ is fault isolation, not an OS sandbox.
 - Linux, a C++20 compiler, CMake 3.24+, and pkg-config.
 - Qt 6.8+ (Core, Gui, Qml, Quick), libvips 8.14+, and libwebp. AVIF/HEIF and
   JPEG XL need libvips built with the appropriate libheif and libjxl loaders.
-- Optional video: mpv headers at build time and `libmpv.so.2` at runtime.
-  The library loads libmpv only inside the decoder. Set `-DIMV_ENABLE_VIDEO=OFF`
-  to omit the adapter.
+- Video-capable builds (the default) require mpv 0.35+ development headers
+  exposing client ABI 2 and software rendering. At runtime only the decoder
+  loads `libmpv.so.2`; still images work without it. An unavailable or
+  incompatible backend is reported as `inspect/unsupported-format` with detail
+  `video-support-unavailable`. Set `-DIMV_ENABLE_VIDEO=OFF` to omit the adapter.
 
 ## Build & Install
 
@@ -83,8 +85,12 @@ match `CMAKE_INSTALL_LIBDIR`). C++ consumers can use
 
 For development builds and installed-module checks, see
 [tests/README.md](tests/README.md). In a pinned nixpkgs environment,
-`pkgs.callPackage ./package.nix { }` builds the package; pass
-`withVideo = true` to include the adapter.
+`pkgs.callPackage ./package.nix { }` builds with the adapter and build-only mpv
+headers. The default output does not include libmpv in its runtime closure;
+the guest loader must be able to find it (for example through `LD_LIBRARY_PATH`).
+Pass `withVideo = true` to pin libmpv in the runtime closure. Non-FHS CMake
+packages can set `IMV_MPV_RUNTIME_HINT` to select an absolute library path in
+place of the default loader search.
 
 ## Documentation
 

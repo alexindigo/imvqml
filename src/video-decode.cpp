@@ -38,12 +38,11 @@ const char *videoDemuxer(int input) {
 #ifdef IMV_HAVE_MPV_HEADERS
 struct MpvApi {
     static void *open() {
-        auto *library = ::dlopen("libmpv.so.2", RTLD_NOW | RTLD_LOCAL);
 #ifdef IMV_MPV_RUNTIME_HINT
-        if (!library)
-            library = ::dlopen(IMV_MPV_RUNTIME_HINT, RTLD_NOW | RTLD_LOCAL);
+        return ::dlopen(IMV_MPV_RUNTIME_HINT, RTLD_NOW | RTLD_LOCAL);
+#else
+        return ::dlopen("libmpv.so.2", RTLD_NOW | RTLD_LOCAL);
 #endif
-        return library;
     }
     void *library = open();
 #define IMV_MPV_SYMBOL(name) decltype(&::mpv_##name) name = symbol<decltype(name)>("mpv_" #name)
@@ -188,13 +187,18 @@ std::optional<DecodeReport> decodeVideo(int input, int output, const DecodeSpec 
 #ifndef IMV_HAVE_MPV_HEADERS
     return fail(DecodeCode::Unsupported, "video-support-unavailable");
 #else
+    // ABI and symbol checks are only the first gate. An ABI-2 runtime
+    // must also accept the restricted configuration and create the SW renderer.
+    const auto unavailable = [&] {
+        return fail(DecodeCode::Unsupported, "video-support-unavailable");
+    };
     const MpvApi api;
     if (!api)
-        return fail(DecodeCode::Unsupported, "video-support-unavailable");
+        return unavailable();
     const std::unique_ptr<mpv_handle, decltype(api.terminate_destroy)> core(api.create(),
                                                                             api.terminate_destroy);
     if (!core)
-        return fail(DecodeCode::Decode, "Could not create the video decoder");
+        return unavailable();
     struct Option {
         const char *name;
         const char *value;
@@ -233,15 +237,15 @@ std::optional<DecodeReport> decodeVideo(int input, int output, const DecodeSpec 
     for (const auto &[name, value, optional] : options) {
         const int rc = api.set_option_string(core.get(), name, value);
         if (rc < 0 && !(optional && rc == MPV_ERROR_OPTION_NOT_FOUND))
-            return fail(DecodeCode::Decode, "Could not configure the restricted video decoder");
+            return unavailable();
     }
     if (api.initialize(core.get()) < 0)
-        return fail(DecodeCode::Decode, "Could not initialize the video decoder");
+        return unavailable();
     char renderer[] = MPV_RENDER_API_TYPE_SW;
     mpv_render_param params[]{{MPV_RENDER_PARAM_API_TYPE, renderer}, {}};
     mpv_render_context *raw = nullptr;
-    if (api.render_context_create(&raw, core.get(), params) < 0)
-        return fail(DecodeCode::Decode, "Could not initialize the software video renderer");
+    if (api.render_context_create(&raw, core.get(), params) < 0 || !raw)
+        return unavailable();
     const std::unique_ptr<mpv_render_context, decltype(api.render_context_free)> render(
         raw, api.render_context_free);
     if (!load(api, core.get(), render.get(), input, spec.position))

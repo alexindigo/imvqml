@@ -7,23 +7,28 @@
 , qt6
 , vips
 , libwebp
-, mpv-unwrapped ? null
+, runCommand
+, mpv-unwrapped
 , withVideo ? false
 }:
-assert withVideo -> mpv-unwrapped != null;
+let
+  mpvHeaders = runCommand "imvqml-mpv-headers-${mpv-unwrapped.version}" { } ''
+    mkdir -p "$out/include"
+    cp -r ${lib.getDev mpv-unwrapped}/include/mpv "$out/include/"
+  '';
+in
 stdenv.mkDerivation {
   pname = "imvqml";
   version = "0.1.0";
   src = lib.cleanSource ./.;
   nativeBuildInputs = [ cmake ninja pkg-config ];
-  buildInputs = [ qt6.qtbase qt6.qtdeclarative vips libwebp ]
-    ++ lib.optionals withVideo [ mpv-unwrapped ];
-  cmakeFlags = [ "-DBUILD_TESTING=OFF" ]
-    ++ (if withVideo then [
-      "-DIMV_ENABLE_VIDEO=ON"
-      "-DIMV_MPV_HEADERS=${lib.getDev mpv-unwrapped}/include"
+  buildInputs = [ qt6.qtbase qt6.qtdeclarative vips libwebp ];
+  cmakeFlags = [
+    "-DBUILD_TESTING=OFF"
+    "-DIMV_MPV_HEADERS=${mpvHeaders}/include"
+  ] ++ lib.optionals withVideo [
       "-DIMV_MPV_RUNTIME_HINT=${lib.getLib mpv-unwrapped}/lib/libmpv.so.2"
-    ] else [ "-DIMV_ENABLE_VIDEO=OFF" ]);
+  ];
   dontWrapQtApps = true;
   meta = {
     description = "Qt Quick image pipeline with an isolated decoder";

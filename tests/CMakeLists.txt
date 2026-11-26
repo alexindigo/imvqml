@@ -23,7 +23,11 @@ set(fixtures "${CMAKE_CURRENT_BINARY_DIR}/fixtures")
 add_test(NAME generate-fixtures
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/generate-fixtures.py" "${fixtures}" "${IMV_MAGICK}")
 set_tests_properties(generate-fixtures PROPERTIES FIXTURES_SETUP images TIMEOUT 30)
-if(IMV_ENABLE_VIDEO AND IMV_MPV_HEADERS AND IMV_MPV_RUNTIME)
+option(IMV_REQUIRE_VIDEO_TESTS "Require the native video tests instead of skipping an absent runtime" OFF)
+if(IMV_REQUIRE_VIDEO_TESTS AND (NOT IMV_ENABLE_VIDEO OR NOT EXISTS "${imv_mpv_runtime}"))
+    message(FATAL_ERROR "Required video tests need the adapter and libmpv.so.2 (or IMV_MPV_RUNTIME_HINT)")
+endif()
+if(imv_mpv_runtime OR NOT IMV_ENABLE_VIDEO)
 find_program(IMV_FFMPEG ffmpeg REQUIRED)
 add_test(NAME generate-video COMMAND "${Python3_EXECUTABLE}"
     "${CMAKE_CURRENT_SOURCE_DIR}/generate-video.py" "${fixtures}" "${IMV_FFMPEG}")
@@ -32,20 +36,24 @@ add_executable(imv-video-test video-test.cpp)
 target_link_libraries(imv-video-test PRIVATE imvqml imv-wire Qt6::Test)
 target_compile_definitions(imv-video-test PRIVATE IMV_FIXTURES="${fixtures}")
 add_dependencies(imv-video-test imvqml-decoder)
-add_test(NAME videos COMMAND imv-video-test samples)
+if(IMV_ENABLE_VIDEO)
+add_test(NAME videos COMMAND imv-video-test samples invalidMedia)
 add_library(imv-mpv-fault SHARED mpv-fault.cpp)
 target_include_directories(imv-mpv-fault PRIVATE "${IMV_MPV_HEADERS}")
 set_target_properties(imv-mpv-fault PROPERTIES OUTPUT_NAME mpv SOVERSION 2
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/fault-mpv")
-add_test(NAME video-native-fault COMMAND "${CMAKE_COMMAND}" -E env
-    "LD_LIBRARY_PATH=$<TARGET_FILE_DIR:imv-mpv-fault>" IMV_VIDEO_TEST=fault
+set(video_env "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/video-runtime.py"
+    "${BWRAP}" "${imv_mpv_runtime}" "$<TARGET_FILE:imv-video-test>")
+foreach(mode IN ITEMS missing options initialize software fault watchdog)
+    add_test(NAME video-native-${mode} COMMAND ${video_env} "${mode}" "$<TARGET_FILE:imv-mpv-fault>")
+    set_tests_properties(video-native-${mode} PROPERTIES FIXTURES_REQUIRED videos TIMEOUT 35)
+endforeach()
+set_tests_properties(videos PROPERTIES FIXTURES_REQUIRED videos TIMEOUT 35)
+else()
+add_test(NAME video-disabled COMMAND "${CMAKE_COMMAND}" -E env IMV_VIDEO_TEST=missing
     "$<TARGET_FILE:imv-video-test>" containment)
-add_test(NAME video-native-watchdog COMMAND "${CMAKE_COMMAND}" -E env
-    "LD_LIBRARY_PATH=$<TARGET_FILE_DIR:imv-mpv-fault>" IMV_MPV_FAULT_HANG=1
-    "$<TARGET_FILE:imv-video-test>" watchdogWithoutGui)
-add_test(NAME video-without-mpv COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/without-mpv.py"
-    "${BWRAP}" "${IMV_MPV_RUNTIME}" "$<TARGET_FILE:imv-video-test>")
-set_tests_properties(videos video-native-fault video-native-watchdog video-without-mpv PROPERTIES FIXTURES_REQUIRED videos TIMEOUT 35)
+set_tests_properties(video-disabled PROPERTIES FIXTURES_REQUIRED videos TIMEOUT 35)
+endif()
 endif()
 add_executable(imv-job-test job-test.cpp)
 target_include_directories(imv-job-test PRIVATE ${PROJECT_SOURCE_DIR}/src/private)

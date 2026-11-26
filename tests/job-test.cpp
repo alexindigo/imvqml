@@ -107,6 +107,75 @@ private slots:
                  "ff00008000ff0040");
     }
 
+    void burst() {
+        ImvImageJob job;
+        QSignalSpy spy(&job, &ImvImageJob::finished);
+        QFile input(fixture("alpha.png").toLocalFile());
+        QVERIFY(input.open(QIODevice::ReadOnly));
+        const auto data = QUrl::fromEncoded("data:image/png;base64," + input.readAll().toBase64());
+        QSet<int> inspect, sample;
+        for (int i = 0; i < 10; ++i) {
+            const int a = job.inspect(fixture("palette.png")), b = job.sample(data, 2, 1);
+            QVERIFY2(a > 0 && b > 0, qPrintable(QString("tickets %1, %2").arg(a).arg(b)));
+            inspect.insert(a);
+            sample.insert(b);
+        }
+        QVERIFY(spy.isEmpty());
+        QTRY_COMPARE_WITH_TIMEOUT(spy.size(), 20, 6000);
+        for (const auto &reply : spy) {
+            const auto id = reply[0].toInt();
+            const auto value = reply[1].toMap();
+            QVERIFY2(value.value("code").toString().isEmpty(),
+                     qPrintable(value.value("detail").toString()));
+            if (inspect.remove(id))
+                QCOMPARE(value.value("sourceInfo").toMap().value("width").toInt(), 64);
+            else {
+                QVERIFY(sample.remove(id));
+                QCOMPARE(value.value("rgba").toByteArray().toHex(), "ff00008000ff0040");
+            }
+        }
+        QVERIFY(inspect.isEmpty() && sample.isEmpty());
+    }
+
+    void queuedCancellationAndFileCapture() {
+        ImvImageJob job;
+        QSignalSpy spy(&job, &ImvImageJob::finished);
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const auto path = dir.filePath("input.png");
+        QVERIFY(QFile::copy(fixture("alpha.png").toLocalFile(), path));
+        for (int i = 0; i < 2; ++i)
+            QVERIFY(job.inspect(fixture("palette.png")) > 0);
+        const auto url = QUrl::fromLocalFile(path);
+        const int kept = job.sample(url, 2, 1);
+        const auto destination = QUrl::fromLocalFile(dir.filePath("cancelled.png"));
+        const int cancelled = job.render(url, 2, 1, destination);
+        QVERIFY(kept > 0 && cancelled > 0);
+        QVERIFY(job.cancel(cancelled));
+        QVERIFY(!job.cancel(cancelled));
+        QVERIFY(QFile::remove(path));
+        QVERIFY(QFile::copy(fixture("palette.png").toLocalFile(), path));
+        QTRY_COMPARE_WITH_TIMEOUT(spy.size(), 4, 6000);
+        int sawKept = 0, sawCancelled = 0;
+        for (const auto &reply : spy) {
+            const auto value = reply[1].toMap();
+            if (reply[0].toInt() == cancelled) {
+                ++sawCancelled;
+                QCOMPARE(value.value("code").toString(), "cancelled");
+            } else {
+                QVERIFY2(value.value("code").toString().isEmpty(),
+                         qPrintable(value.value("detail").toString()));
+                if (reply[0].toInt() == kept) {
+                    ++sawKept;
+                    QCOMPARE(value.value("rgba").toByteArray().toHex(), "ff00008000ff0040");
+                }
+            }
+        }
+        QCOMPARE(sawKept, 1);
+        QCOMPARE(sawCancelled, 1);
+        QVERIFY(!QFile::exists(destination.toLocalFile()));
+    }
+
     void outcomes_data() {
         QTest::addColumn<QString>("name");
         QTest::addColumn<QString>("stage");

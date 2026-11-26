@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-only
+#include "decode-client.h"
 #include "image-node.h"
+#include "image-pipeline.h"
 #include <QBuffer>
 #include <QColor>
 #include <QFile>
@@ -8,6 +10,7 @@
 #include <QQuickImageProvider>
 #include <QQuickItem>
 #include <QQuickWindow>
+#include <QTemporaryDir>
 #include <QtTest>
 #include <array>
 #include <imvqml/imvimagejob.h>
@@ -19,6 +22,8 @@ private slots:
     void transientProvider_data();
     void transientProvider();
     void transientProviderJob();
+    void transientProviderRenderUnderLoad();
+    void explicitQueueFull();
     void transientAsyncProviderJob();
     void masks();
     void alphaTint();
@@ -224,7 +229,6 @@ void ItemTest::transientAsyncProviderJob() {
     QVERIFY(id > 0 && provider->response);
     const int still = job->sample(QUrl::fromLocalFile(IMV_FIXTURES "/palette.png"), 8, 8);
     QVERIFY(still > 0);
-    QCOMPARE(job->sample(url, 8, 8), -2);
     provider->deliver();
     QVERIFY(done.isEmpty());
     QTRY_COMPARE(done.size(), 2);
@@ -244,6 +248,95 @@ void ItemTest::transientAsyncProviderJob() {
     QCOMPARE(done[2][0].toInt(), cancelled);
     QCOMPARE(done[2][1].toMap().value("code").toString(), QString("cancelled"));
     QTRY_VERIFY(!provider->response);
+}
+
+void ItemTest::transientProviderRenderUnderLoad() {
+    QQmlEngine engine;
+    engine.addImportPath(IMV_IMPORT_PATH);
+    auto *provider = new TransientProvider(QQuickImageProvider::Texture);
+    engine.addImageProvider("transient", provider);
+    QQmlComponent component(&engine);
+    component.setData("import ImvQml\nImvImageJob {}", QUrl());
+    QTRY_VERIFY(!component.isLoading());
+    QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+    const std::unique_ptr<QObject> root(component.create());
+    auto *job = qobject_cast<Imv::ImvImageJob *>(root.get());
+    QVERIFY(job);
+    QSignalSpy done(job, &Imv::ImvImageJob::finished);
+    const auto file = QUrl::fromLocalFile(IMV_FIXTURES "/palette.png");
+    auto &pool = Imv::decoderPool();
+    QTRY_COMPARE(pool.idleSlots(), 2);
+    // Submit two jobs before occupying both actual pool slots, without
+    // yielding to preparation or decode replies.
+    QVERIFY(job->inspect(file) > 0);
+    QVERIFY(job->sample(file, 8, 8) > 0);
+    for (int i = 0; i < 2; ++i) {
+        const auto blocker =
+            Imv::submitDecode(pool, Imv::openSource(file).fd, {}, [](Imv::Decoded) {});
+        QCOMPARE(blocker.status, Imv::Pool::Admission::Accepted);
+    }
+    QCOMPARE(pool.capacity(), Imv::Pool::Admission::Busy);
+    QTemporaryDir outputs;
+    QVERIFY(outputs.isValid());
+    const auto url = QUrl("image://transient/once");
+    QHash<int, QString> rendered;
+    for (int i = 0; i < 9; ++i) {
+        const auto path = outputs.filePath(QString::number(i) + ".png");
+        const int ticket = job->render(url, 8, 8, QUrl::fromLocalFile(path));
+        QVERIFY2(ticket > 0, qPrintable(QString("render returned %1").arg(ticket)));
+        QVERIFY(!rendered.contains(ticket));
+        rendered.insert(ticket, path);
+    }
+    QCOMPARE(provider->requests, 9);
+    provider->forget();
+    QVERIFY(done.isEmpty());
+    QTRY_COMPARE_WITH_TIMEOUT(done.size(), 11, 6000);
+    for (const auto &reply : done) {
+        const auto value = reply[1].toMap();
+        QVERIFY2(value.value("code").toString().isEmpty(),
+                 qPrintable(value.value("detail").toString()));
+        if (const auto path = rendered.take(reply[0].toInt()); !path.isEmpty()) {
+            const QImage image(path);
+            QCOMPARE(image.size(), QSize(8, 8));
+            QCOMPARE(image.pixelColor(4, 4), QColor(Qt::white));
+        }
+    }
+    QVERIFY(rendered.isEmpty());
+}
+
+void ItemTest::explicitQueueFull() {
+    QQmlEngine engine;
+    engine.addImportPath(IMV_IMPORT_PATH);
+    auto *provider = new TransientProvider(QQuickImageProvider::Texture);
+    engine.addImageProvider("transient", provider);
+    QQmlComponent component(&engine);
+    component.setData("import ImvQml\nImvImageJob {}", QUrl());
+    QTRY_VERIFY(!component.isLoading());
+    QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+    const std::unique_ptr<QObject> root(component.create());
+    auto *job = qobject_cast<Imv::ImvImageJob *>(root.get());
+    QVERIFY(job);
+    QSignalSpy done(job, &Imv::ImvImageJob::finished);
+    const auto url = QUrl("image://transient/once");
+    QList<int> tickets;
+    for (int i = 0; i < Imv::ImagePipeline::QueueLimit; ++i) {
+        const int ticket = job->inspect(url);
+        QVERIFY(ticket > 0);
+        tickets.append(ticket);
+    }
+    QCOMPARE(job->inspect(url), -2);
+    QCOMPARE(provider->requests, Imv::ImagePipeline::QueueLimit);
+    QVERIFY(job->cancel(tickets.takeLast()));
+    const int admitted = job->inspect(url);
+    QVERIFY(admitted > 0);
+    QCOMPARE(provider->requests, Imv::ImagePipeline::QueueLimit + 1);
+    tickets.append(admitted);
+    for (const int id : tickets)
+        QVERIFY(job->cancel(id));
+    QVERIFY(done.isEmpty());
+    QTRY_COMPARE(done.size(), Imv::ImagePipeline::QueueLimit + 1);
+    for (const auto &reply : done)
+        QCOMPARE(reply[1].toMap().value("code").toString(), "cancelled");
 }
 
 void ItemTest::display() {

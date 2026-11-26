@@ -1,0 +1,8 @@
+/build*/
+/out/
+/imvqml-decoder
+*.test
+.envrc
+token
+*.local.toml
+compile_commands.json

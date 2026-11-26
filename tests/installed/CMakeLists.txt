@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: LGPL-3.0-only
+cmake_minimum_required(VERSION 3.24)
+project(imv-installed-test LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 20)
+find_package(imvqml 0.1 CONFIG REQUIRED)
+find_package(Qt6 6.8 REQUIRED COMPONENTS Qml)
+add_executable(imv-installed-cpp cpp.cpp)
+target_link_libraries(imv-installed-cpp PRIVATE imvqml::imvqml)
+add_executable(imv-installed-qml qml.cpp)
+target_link_libraries(imv-installed-qml PRIVATE Qt6::Qml)

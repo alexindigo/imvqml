@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: LGPL-3.0-only
+cmake_minimum_required(VERSION 3.24)
+if(NOT DEFINED PIXELS)
+    set(PIXELS OFF)
+endif()
+set(source "@PROJECT_SOURCE_DIR@")
+set(build "@PROJECT_BINARY_DIR@")
+if(NOT IS_DIRECTORY "$ENV{TMPDIR}")
+    message(FATAL_ERROR "Set TMPDIR to the disk-backed project workspace temp directory")
+endif()
+file(REAL_PATH "$ENV{TMPDIR}" scratch)
+cmake_path(IS_PREFIX source "${scratch}" NORMALIZE under_source)
+cmake_path(IS_PREFIX build "${scratch}" NORMALIZE under_build)
+if(under_source OR under_build)
+    message(FATAL_ERROR "The relocation test needs TMPDIR outside both original trees")
+endif()
+string(RANDOM LENGTH 12 ALPHABET 0123456789abcdef suffix)
+set(work "${scratch}/relocate-${suffix}")
+set(prefix "${work}/relocated-prefix")
+file(MAKE_DIRECTORY "${work}/empty")
+file(COPY "${source}/tests/installed/" DESTINATION "${work}/consumer")
+
+function(run)
+    execute_process(COMMAND ${ARGV} RESULT_VARIABLE status)
+    if(NOT status STREQUAL "0")
+        file(REMOVE_RECURSE "${work}")
+        message(FATAL_ERROR "Isolated install check step failed (${status}): ${ARGV}")
+    endif()
+endfunction()
+run("${CMAKE_COMMAND}" --install "${build}" --prefix "${work}/first-prefix")
+file(RENAME "${work}/first-prefix" "${prefix}")
+
+set(denied "@BWRAP@" --die-with-parent --ro-bind / / --proc /proc --dev /dev
+    --ro-bind "${work}/empty" "${source}" --ro-bind "${work}/empty" "${build}"
+    --bind "${work}" "${work}" --chdir "${work}"
+    --unsetenv LD_LIBRARY_PATH --unsetenv QML_IMPORT_PATH --unsetenv QML2_IMPORT_PATH
+    --unsetenv DISPLAY --unsetenv WAYLAND_DISPLAY --setenv TMPDIR "${work}")
+run(${denied} "${CMAKE_COMMAND}" -S consumer -B consumer-build "-DCMAKE_PREFIX_PATH=${prefix}")
+run(${denied} "${CMAKE_COMMAND}" --build consumer-build --parallel 2)
+run(${denied} "${work}/consumer-build/imv-installed-cpp")
+run(${denied} "${work}/consumer-build/imv-installed-qml" "${prefix}/@qml_dir@" "${prefix}" "${PIXELS}")
+file(REMOVE_RECURSE "${work}")

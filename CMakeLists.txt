@@ -1,0 +1,71 @@
+# SPDX-License-Identifier: LGPL-3.0-only
+cmake_minimum_required(VERSION 3.24)
+project(imvqml VERSION 0.1.0 LANGUAGES CXX)
+
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    message(FATAL_ERROR "imvqml requires Linux descriptor passing and shared memory")
+endif()
+
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+include(CTest)
+find_package(Qt6 6.8 REQUIRED COMPONENTS Core Qml)
+qt_standard_project_setup(REQUIRES 6.8)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+set(qml_dir "${CMAKE_INSTALL_LIBDIR}/qt6/qml")
+set(stage "${PROJECT_BINARY_DIR}/out")
+file(RELATIVE_PATH decoder_from_lib "/prefix/${CMAKE_INSTALL_LIBDIR}"
+    "/prefix/${CMAKE_INSTALL_LIBEXECDIR}/imvqml-decoder")
+
+add_library(imv-wire STATIC src/private/wire.cpp)
+target_include_directories(imv-wire PUBLIC src/private)
+target_link_libraries(imv-wire PUBLIC Qt6::Core)
+set_target_properties(imv-wire PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+add_executable(imvqml-decoder src/decoder.cpp)
+target_link_libraries(imvqml-decoder PRIVATE imv-wire)
+set_target_properties(imvqml-decoder PROPERTIES RUNTIME_OUTPUT_DIRECTORY
+    "${stage}/${CMAKE_INSTALL_LIBEXECDIR}")
+
+add_library(imvqml SHARED)
+add_library(imvqml::imvqml ALIAS imvqml)
+qt_add_qml_module(imvqml URI ImvQml VERSION 1.0
+    NO_PLUGIN_OPTIONAL
+    OUTPUT_DIRECTORY "${stage}/${qml_dir}/ImvQml"
+    SOURCES src/include/imvqml/imvimagejob.h src/imvimagejob.cpp src/private/helper.cpp)
+target_include_directories(imvqml PUBLIC
+    "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/include>"
+    "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
+    PRIVATE src/include/imvqml)
+target_link_libraries(imvqml PUBLIC Qt6::Core Qt6::QmlIntegration
+    PRIVATE Qt6::Qml imv-wire ${CMAKE_DL_LIBS})
+target_compile_definitions(imvqml PRIVATE IMV_DECODER_FROM_LIB="${decoder_from_lib}")
+set_target_properties(imvqml PROPERTIES VERSION "${PROJECT_VERSION}" SOVERSION 0
+    LIBRARY_OUTPUT_DIRECTORY "${stage}/${CMAKE_INSTALL_LIBDIR}")
+set_target_properties(imvqmlplugin PROPERTIES INSTALL_RPATH "$ORIGIN/../../..")
+
+install(TARGETS imvqml EXPORT imvqmlTargets LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+install(TARGETS imvqmlplugin LIBRARY DESTINATION "${qml_dir}/ImvQml")
+install(TARGETS imvqml-decoder RUNTIME DESTINATION "${CMAKE_INSTALL_LIBEXECDIR}")
+install(FILES "${stage}/${qml_dir}/ImvQml/qmldir"
+    "${stage}/${qml_dir}/ImvQml/imvqml.qmltypes" DESTINATION "${qml_dir}/ImvQml")
+install(DIRECTORY src/include/imvqml DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
+install(FILES README.md API.md Architecture.md FeatureMapping.md UPSTREAM.md LICENSE
+    DESTINATION "${CMAKE_INSTALL_DOCDIR}")
+install(DIRECTORY LICENSES DESTINATION "${CMAKE_INSTALL_DOCDIR}")
+
+set(package_dir "${CMAKE_INSTALL_LIBDIR}/cmake/imvqml")
+configure_package_config_file(cmake/imvqmlConfig.cmake.in
+    "${CMAKE_CURRENT_BINARY_DIR}/imvqmlConfig.cmake" INSTALL_DESTINATION "${package_dir}")
+write_basic_package_version_file("${CMAKE_CURRENT_BINARY_DIR}/imvqmlConfigVersion.cmake"
+    COMPATIBILITY SameMinorVersion)
+install(EXPORT imvqmlTargets NAMESPACE imvqml:: DESTINATION "${package_dir}")
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/imvqmlConfig.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/imvqmlConfigVersion.cmake" DESTINATION "${package_dir}")
+
+if(BUILD_TESTING)
+    add_subdirectory(tests)
+endif()

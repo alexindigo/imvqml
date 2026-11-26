@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: LGPL-3.0-only
+find_package(Qt6 REQUIRED COMPONENTS Test)
+find_program(BWRAP bwrap REQUIRED)
+
+add_executable(imv-wire-test wire-test.cpp)
+target_link_libraries(imv-wire-test PRIVATE imv-wire imvqml Qt6::Test)
+add_dependencies(imv-wire-test imvqml-decoder)
+add_test(NAME wire COMMAND imv-wire-test)
+set_tests_properties(wire PROPERTIES TIMEOUT 10)
+
+configure_file(relocate.cmake.in relocate.cmake @ONLY)
+add_test(NAME installed-prefix COMMAND "${CMAKE_COMMAND}" -P relocate.cmake)
+add_test(NAME installed-scaffold-outcome COMMAND "${CMAKE_COMMAND}" -DPIXELS=SCAFFOLD -P relocate.cmake)
+set_tests_properties(installed-prefix installed-scaffold-outcome PROPERTIES TIMEOUT 90)
+option(IMV_ENABLE_PIXEL_ACCEPTANCE "Enable the installed pixel acceptance test" OFF)
+if(IMV_ENABLE_PIXEL_ACCEPTANCE)
+    add_test(NAME installed-pixels-red COMMAND "${CMAKE_COMMAND}" -DPIXELS=ON -P relocate.cmake)
+    set_tests_properties(installed-pixels-red PROPERTIES LABELS acceptance TIMEOUT 90)
+endif()

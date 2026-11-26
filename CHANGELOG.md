@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.3] - 2026-11-26
+
+### Fix
+
+The isolated decoder restores compatibility with BMP, Netpbm, ICO, ICNS,
+JPEG 2000, OpenEXR, Radiance HDR, DDS, and TGA without using ImageMagick.
+Local videos above 256 MiB can supply thumbnails without copying the file;
+image size limits and video capture limits still apply. Cache clear and
+invalidation now return tickets and report what was removed, kept under a
+live lease, or could not be removed.
+
+- Restore media coverage and report cache eviction (`00af407`, merged in `3b7e97d`).
+
 ## [0.1.2] - 2026-11-26
 
 ### Fix

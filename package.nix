@@ -21,7 +21,7 @@ let
 in
 stdenv.mkDerivation {
   pname = "imvqml";
-  version = "0.1.2";
+  version = "0.1.3";
   src = lib.cleanSource ./.;
   nativeBuildInputs = [ cmake ninja pkg-config makeWrapper ];
   buildInputs = [ qt6.qtbase qt6.qtdeclarative qt6.qtimageformats kdePackages.kimageformats vips libwebp ];

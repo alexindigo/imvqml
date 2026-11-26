@@ -20,6 +20,7 @@ struct DecodeSpec {
     QSize bounds{0, 0};
     enum Scale : int { Contain, Cover, Stretch } scale = Contain;
     int page = 0;
+    double position = 0;
     bool valid() const;
 };
 

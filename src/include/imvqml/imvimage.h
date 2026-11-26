@@ -18,6 +18,8 @@ class ImvImage : public QQuickItem {
     Q_PROPERTY(qreal radius READ radius WRITE setRadius NOTIFY radiusChanged FINAL)
     Q_PROPERTY(bool animate READ animate WRITE setAnimate NOTIFY animateChanged FINAL)
     Q_PROPERTY(bool playing READ playing WRITE setPlaying NOTIFY playingChanged FINAL)
+    Q_PROPERTY(double videoPosition READ videoPosition WRITE setVideoPosition NOTIFY
+                   videoPositionChanged FINAL)
     Q_PROPERTY(Status status READ status NOTIFY statusChanged FINAL)
     Q_PROPERTY(QString errorStage READ errorStage NOTIFY errorChanged FINAL)
     Q_PROPERTY(QString errorCode READ errorCode NOTIFY errorChanged FINAL)
@@ -48,6 +50,8 @@ public:
     void setAnimate(bool animate);
     bool playing() const;
     void setPlaying(bool playing);
+    double videoPosition() const;
+    void setVideoPosition(double position);
     Status status() const;
     QString errorStage() const;
     QString errorCode() const;
@@ -61,6 +65,7 @@ signals:
     void radiusChanged();
     void animateChanged();
     void playingChanged();
+    void videoPositionChanged();
     void statusChanged();
     void errorChanged();
     void sourceInfoChanged();

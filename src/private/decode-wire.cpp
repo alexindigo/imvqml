@@ -2,7 +2,9 @@
 #include "decode-wire.h"
 
 #include <QtEndian>
+#include <bit>
 #include <cerrno>
+#include <cmath>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -15,9 +17,10 @@ constexpr int MaxDetail = 1024;
 
 bool DecodeSpec::valid() const {
     if (mode == Inspect)
-        return bounds == QSize(0, 0) && scale == Contain && page == 0;
+        return bounds == QSize(0, 0) && scale == Contain && page == 0 && position == 0;
     return mode >= Pixels && mode <= FrameAt && rgbaBytes(bounds) > 0 && scale >= Contain &&
-           scale <= Stretch && page >= 0 && (mode == FrameAt || page == 0);
+           scale <= Stretch && page >= 0 && (mode == FrameAt || page == 0) &&
+           std::isfinite(position) && position >= 0 && position <= 1;
 }
 
 bool SourceInfo::valid() const {
@@ -32,23 +35,25 @@ qint64 rgbaBytes(QSize size) {
 }
 
 QByteArray encode(const DecodeSpec &spec) {
-    QByteArray output(20, Qt::Uninitialized);
+    QByteArray output(28, Qt::Uninitialized);
     qToLittleEndian(qint32(spec.mode), output.data());
     qToLittleEndian(qint32(spec.bounds.width()), output.data() + 4);
     qToLittleEndian(qint32(spec.bounds.height()), output.data() + 8);
     qToLittleEndian(qint32(spec.scale), output.data() + 12);
     qToLittleEndian(qint32(spec.page), output.data() + 16);
+    qToLittleEndian(std::bit_cast<quint64>(spec.position == 0 ? 0.0 : spec.position),
+                    output.data() + 20);
     return output;
 }
 
 bool decode(QByteArrayView bytes, DecodeSpec &spec) {
-    if (bytes.size() != 20)
+    if (bytes.size() != 28)
         return false;
     auto *p = bytes.data();
     spec = {DecodeSpec::Mode(qFromLittleEndian<qint32>(p)),
             QSize(qFromLittleEndian<qint32>(p + 4), qFromLittleEndian<qint32>(p + 8)),
-            DecodeSpec::Scale(qFromLittleEndian<qint32>(p + 12)),
-            qFromLittleEndian<qint32>(p + 16)};
+            DecodeSpec::Scale(qFromLittleEndian<qint32>(p + 12)), qFromLittleEndian<qint32>(p + 16),
+            std::bit_cast<double>(qFromLittleEndian<quint64>(p + 20))};
     return spec.valid();
 }
 

@@ -23,6 +23,27 @@ set(fixtures "${CMAKE_CURRENT_BINARY_DIR}/fixtures")
 add_test(NAME generate-fixtures
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/generate-fixtures.py" "${fixtures}" "${IMV_MAGICK}")
 set_tests_properties(generate-fixtures PROPERTIES FIXTURES_SETUP images TIMEOUT 30)
+if(IMV_ENABLE_VIDEO AND IMV_MPV_HEADERS AND IMV_MPV_RUNTIME)
+find_program(IMV_FFMPEG ffmpeg REQUIRED)
+add_test(NAME generate-video COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/generate-video.py" "${fixtures}" "${IMV_FFMPEG}")
+set_tests_properties(generate-video PROPERTIES FIXTURES_REQUIRED images FIXTURES_SETUP videos TIMEOUT 30)
+add_executable(imv-video-test video-test.cpp)
+target_link_libraries(imv-video-test PRIVATE imvqml Qt6::Test)
+target_compile_definitions(imv-video-test PRIVATE IMV_FIXTURES="${fixtures}")
+add_dependencies(imv-video-test imvqml-decoder)
+add_test(NAME videos COMMAND imv-video-test samples)
+add_library(imv-mpv-fault SHARED mpv-fault.cpp)
+target_include_directories(imv-mpv-fault PRIVATE "${IMV_MPV_HEADERS}")
+set_target_properties(imv-mpv-fault PROPERTIES OUTPUT_NAME mpv SOVERSION 2
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/fault-mpv")
+add_test(NAME video-native-fault COMMAND "${CMAKE_COMMAND}" -E env
+    "LD_LIBRARY_PATH=$<TARGET_FILE_DIR:imv-mpv-fault>" IMV_VIDEO_TEST=fault
+    "$<TARGET_FILE:imv-video-test>" containment)
+add_test(NAME video-without-mpv COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/without-mpv.py"
+    "${BWRAP}" "${IMV_MPV_RUNTIME}" "$<TARGET_FILE:imv-video-test>")
+set_tests_properties(videos video-native-fault video-without-mpv PROPERTIES FIXTURES_REQUIRED videos TIMEOUT 35)
+endif()
 add_executable(imv-job-test job-test.cpp)
 target_link_libraries(imv-job-test PRIVATE imvqml Qt6::Test Qt6::Gui)
 target_compile_definitions(imv-job-test PRIVATE IMV_FIXTURES="${fixtures}")

@@ -16,10 +16,11 @@ public:
     explicit ImvImageJob(QObject *parent = nullptr);
     ~ImvImageJob() override;
 
-    Q_INVOKABLE int sample(const QUrl &source, int maxWidth, int maxHeight);
+    Q_INVOKABLE int sample(const QUrl &source, int maxWidth, int maxHeight,
+                           double videoPosition = 0);
     Q_INVOKABLE int inspect(const QUrl &source);
     Q_INVOKABLE int render(const QUrl &source, int maxWidth, int maxHeight, const QUrl &destination,
-                           const QString &format = QStringLiteral("png"));
+                           const QString &format = QStringLiteral("png"), double videoPosition = 0);
     Q_INVOKABLE bool cancel(int id);
 
 signals:

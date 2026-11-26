@@ -2,7 +2,14 @@
 
 - mpvqml v0.3.0 (`56a1fc63686e6c87b46cd6d75f79622b81cca757`), LGPL-3.0-only:
   discovery, producer and installed-consumer architecture reference. The
-  license files are copied from that tag. No capture code is ported yet.
+  license files are copied from that tag. `src/video-decode.cpp` adapts the
+  native transaction in `mpvframecapture.cpp`: restricted options, independent
+  reply and load/seek-to-restart gates, VO update and skip, software `rgb0`
+  rendering and alpha normalization. It carries the `format=rotate=0`
+  workaround: read original `video-params/rotate`, not filtered output, and
+  rotate owned pixels outside the software renderer. Carry upstream fixes
+  for these operations forward to this port. `imvqml` substitutes a process
+  deadline and sealed result for mpvqml's in-process deadline and file export.
 - Qt 6.8 or newer: QML registration and descriptor-preserving process
   setup (`QProcess::setChildProcessModifier`, `UnixProcessParameters`).
   `QProcess` provides nonblocking event-loop reaping; the private pool keeps
@@ -18,7 +25,8 @@
   helper only; their filename/buffer variants remain blocked. This does not
   change upstream's security classification or remove the decoder's limits.
 - libwebp encodes trusted normalized RGBA for optional lossless file export;
-  source decoding stays in the helper. No libmpv linkage yet.
+  source decoding stays in the helper. Video is verified with mpv 0.41;
+  only the helper opens the optional `libmpv.so.2` DSO.
 - The store measurement uses the MIT-licensed QOI reference header from
   phoboslab/qoi commit `ffb2d2cb74a1de60819b21b939f7209aa53e91c1`, in
   `tests/vendor/qoi.h` with one blank line's trailing tabs removed. It is

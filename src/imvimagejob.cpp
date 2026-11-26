@@ -44,10 +44,11 @@ struct ImvImageJob::State {
     }
 
     int begin(Method method, const QUrl &url, QSize bounds, const QUrl &dest = {},
-              QString format = {}) {
+              QString format = {}, double position = 0) {
         if (lastId == std::numeric_limits<int>::max())
             return -3;
-        const DecodeSpec spec{method == Inspect ? DecodeSpec::Inspect : DecodeSpec::Pixels, bounds};
+        const DecodeSpec spec{method == Inspect ? DecodeSpec::Inspect : DecodeSpec::Pixels, bounds,
+                              DecodeSpec::Contain, 0, position};
         QString path;
         Failure argumentError;
         if (!spec.valid()) {
@@ -161,12 +162,12 @@ ImvImageJob::~ImvImageJob() = default;
 int ImvImageJob::inspect(const QUrl &source) {
     return d->begin(State::Inspect, source, QSize(0, 0));
 }
-int ImvImageJob::sample(const QUrl &source, int width, int height) {
-    return d->begin(State::Sample, source, QSize(width, height));
+int ImvImageJob::sample(const QUrl &source, int width, int height, double position) {
+    return d->begin(State::Sample, source, QSize(width, height), {}, {}, position);
 }
 int ImvImageJob::render(const QUrl &source, int width, int height, const QUrl &destination,
-                        const QString &format) {
-    return d->begin(State::Render, source, QSize(width, height), destination, format);
+                        const QString &format, double position) {
+    return d->begin(State::Render, source, QSize(width, height), destination, format, position);
 }
 bool ImvImageJob::cancel(int id) {
     auto job = d->jobs.value(id);

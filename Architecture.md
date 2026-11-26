@@ -104,3 +104,14 @@ Freedesktop thumbnails are explicit first-frame jobs. The store worker
 encodes trusted output to a PNG in the requested standard bucket, including
 thumbnail URI and modification metadata. The private cache and the shared
 thumbnail directories have separate ownership and deletion paths.
+
+## Optional video
+
+The helper probes a bounded container signature only after libvips rejects
+the source. It loads libmpv dynamically and selects a restricted demuxer on
+the already-open descriptor. The transaction independently correlates the
+native command reply and the load or seek event followed by playback restart.
+The software renderer sees unrotated input; the helper uses source metadata
+to orient pixels before publishing the same sealed RGBA result as stills.
+The application does not link libmpv or mpvqml. The helper-pool deadline and
+crash boundary also apply to native initialization and teardown.

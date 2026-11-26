@@ -28,6 +28,7 @@ struct ImvImage::State {
     qreal radius = 0;
     bool animate = true;
     bool playing = true;
+    double videoPosition = 0;
     Status status = Idle;
     Failure failure;
     QVariantMap info;
@@ -152,6 +153,17 @@ void ImvImage::syncPlayback() {
                          window()->visibility() != QWindow::Minimized);
 }
 
+double ImvImage::videoPosition() const { return d->videoPosition; }
+void ImvImage::setVideoPosition(double position) {
+    if (!std::isfinite(position) || position < 0 || position > 1 || d->videoPosition == position)
+        return;
+    d->videoPosition = position;
+    const QPointer guard(this);
+    resetRequest(true);
+    if (guard)
+        emit videoPositionChanged();
+}
+
 ImvImage::Status ImvImage::status() const { return d->status; }
 QString ImvImage::errorStage() const { return d->failure.stage; }
 QString ImvImage::errorCode() const { return d->failure.code; }
@@ -231,7 +243,7 @@ void ImvImage::updatePolish() {
     else if (d->fill == Stretch)
         scale = DecodeSpec::Stretch;
     const DecodeSpec spec{d->url.scheme() == "image" ? DecodeSpec::Pixels : DecodeSpec::Animation,
-                          bounds, scale};
+                          bounds, scale, 0, d->videoPosition};
     const auto generation = d->generation;
     const auto guard = QPointer(this);
     setOutcome(Loading);

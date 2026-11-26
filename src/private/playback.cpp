@@ -127,6 +127,7 @@ void Playback::fill() {
     auto spec = m_base->spec;
     spec.mode = DecodeSpec::FrameAt;
     spec.page = index;
+    spec.position = 0;
     const auto ticket = submitDecode(
         *m_helper, duplicateSource(*m_base->stream), spec, [this, index, cycle](Decoded value) {
             m_inFlight = false;

@@ -36,6 +36,14 @@ Showing it again resumes at the playhead if `playing` is still true. Finite
 animations stop on the final frame. Multi-page images with no frame timing
 stay on their first page. Image jobs always select the first frame.
 
+Recognized local video containers (MP4/MOV, Matroska/WebM, AVI, and Ogg)
+use a single captured frame, not playback. `ImvImage.videoPosition` and the
+optional final `videoPosition` argument of `sample` and `render` select a
+fraction from 0 (first frame) to 1 (near the end) when duration is known.
+`sourceInfo.format` is `video` with oriented dimensions and one frame.
+When compatible libmpv is unavailable, video yields
+`inspect/unsupported-format` with `detail: "video-support-unavailable"`.
+
 ## Cache policy and thumbnails
 
 `ImvCache` (`<imvqml/imvcache.h>` in C++) has process-wide policy:

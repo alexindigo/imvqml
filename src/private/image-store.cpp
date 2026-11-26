@@ -143,7 +143,8 @@ void ImageStore::lookup(Fd input, DecodeSpec spec, std::function<void(Lookup)> d
             if (d->enabled && d->epoch == epoch && privateDirectory(d->directory)) {
                 result.fingerprint = digest(input);
                 if (!result.fingerprint.isEmpty()) {
-                    auto version = d->version + libraryStamp(IMV_VIPS_PATH);
+                    auto version =
+                        d->version + libraryStamp(IMV_VIPS_PATH) + libraryStamp(IMV_MPV_PATH);
                     if (spec.mode == DecodeSpec::Animation || spec.mode == DecodeSpec::Pixels)
                         version += encode(spec);
                     const auto parameter =

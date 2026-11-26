@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: LGPL-3.0-only
+#include "video-decode.h"
 #include "vips-decode.h"
 
 #include <sys/resource.h>
@@ -26,8 +27,12 @@ int main(int, char **argv) {
             if (!Imv::decode(frame.body, spec) ||
                 frame.fds.size() != (spec.mode == Imv::DecodeSpec::Inspect ? 1u : 2u))
                 return 1;
-            const auto result = Imv::decodeWithVips(
-                frame.fds.front().get(), frame.fds.size() == 2 ? frame.fds.back().get() : -1, spec);
+            const auto input = frame.fds.front().get();
+            const auto output = frame.fds.size() == 2 ? frame.fds.back().get() : -1;
+            auto result = Imv::decodeWithVips(input, output, spec);
+            if (result.code == Imv::DecodeCode::Unsupported)
+                if (auto video = Imv::decodeVideo(input, output, spec))
+                    result = std::move(*video);
             frame.fds.clear();
             frame.body = Imv::encode(result);
             frame.kind = Imv::Kind::Reply;

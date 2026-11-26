@@ -16,6 +16,8 @@ pkg_check_modules(WEBP REQUIRED IMPORTED_TARGET libwebp)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/vips-decode.cpp")
 file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/src/vips-decode.cpp" IMV_LOADER_VERSION)
 find_library(IMV_VIPS_PATH NAMES vips HINTS ${VIPS_LIBRARY_DIRS} REQUIRED)
+find_file(IMV_MPV_RUNTIME NAMES libmpv.so.2 PATH_SUFFIXES "${CMAKE_LIBRARY_ARCHITECTURE}"
+    PATHS /usr/lib /usr/local/lib)
 qt_standard_project_setup(REQUIRES 6.8)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -31,9 +33,15 @@ target_include_directories(imv-wire PUBLIC src/private)
 target_link_libraries(imv-wire PUBLIC Qt6::Core)
 set_target_properties(imv-wire PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-add_executable(imvqml-decoder src/decoder.cpp src/vips-decode.cpp)
+option(IMV_ENABLE_VIDEO "Build the optional runtime libmpv adapter when headers are available" ON)
+find_path(IMV_MPV_HEADERS mpv/render.h)
+add_executable(imvqml-decoder src/decoder.cpp src/vips-decode.cpp src/video-decode.cpp)
 target_compile_definitions(imvqml-decoder PRIVATE QT_NO_KEYWORDS)
-target_link_libraries(imvqml-decoder PRIVATE imv-wire PkgConfig::VIPS)
+target_link_libraries(imvqml-decoder PRIVATE imv-wire PkgConfig::VIPS Qt6::Gui ${CMAKE_DL_LIBS})
+if(IMV_ENABLE_VIDEO AND IMV_MPV_HEADERS)
+    target_include_directories(imvqml-decoder PRIVATE "${IMV_MPV_HEADERS}")
+    target_compile_definitions(imvqml-decoder PRIVATE IMV_HAVE_MPV_HEADERS)
+endif()
 set_target_properties(imvqml-decoder PROPERTIES RUNTIME_OUTPUT_DIRECTORY
     "${stage}/${CMAKE_INSTALL_LIBEXECDIR}")
 
@@ -55,7 +63,7 @@ target_link_libraries(imvqml PUBLIC Qt6::Core Qt6::QmlIntegration Qt6::Quick
     PRIVATE Qt6::Gui Qt6::Qml imv-wire PkgConfig::WEBP ${CMAKE_DL_LIBS})
 target_compile_definitions(imvqml PRIVATE IMV_DECODER_FROM_LIB="${decoder_from_lib}"
     IMV_STORE_VERSION="${PROJECT_VERSION}/${VIPS_VERSION}/${IMV_LOADER_VERSION}"
-    IMV_VIPS_PATH="${IMV_VIPS_PATH}")
+    IMV_VIPS_PATH="${IMV_VIPS_PATH}" IMV_MPV_PATH="${IMV_MPV_RUNTIME}")
 set_target_properties(imvqml PROPERTIES VERSION "${PROJECT_VERSION}" SOVERSION 0
     LIBRARY_OUTPUT_DIRECTORY "${stage}/${CMAKE_INSTALL_LIBDIR}")
 set_target_properties(imvqmlplugin PROPERTIES INSTALL_RPATH "$ORIGIN/../../..")

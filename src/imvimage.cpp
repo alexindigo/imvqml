@@ -179,8 +179,11 @@ void ImvImage::setAnimate(bool animate) {
     if (std::exchange(d->animate, animate) != animate) {
         if (d->playback && !animate)
             d->playback->rewind();
-        syncPlayback();
-        emit animateChanged();
+        const QPointer guard(this);
+        if (!d->provider && (d->hasBytes || !d->url.isEmpty()))
+            resetRequest(false);
+        if (guard)
+            emit animateChanged();
     }
 }
 
@@ -290,8 +293,8 @@ void ImvImage::updatePolish() {
         scale = DecodeSpec::Cover;
     else if (d->fill == Stretch)
         scale = DecodeSpec::Stretch;
-    const DecodeSpec spec{d->provider ? DecodeSpec::Pixels : DecodeSpec::Animation, bounds, scale,
-                          0, d->videoPosition};
+    const DecodeSpec spec{!d->provider && d->animate ? DecodeSpec::Animation : DecodeSpec::Pixels,
+                          bounds, scale, 0, d->videoPosition};
     const auto generation = d->generation;
     const auto guard = QPointer(this);
     setOutcome(Loading);

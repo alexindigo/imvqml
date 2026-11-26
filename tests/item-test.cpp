@@ -22,6 +22,7 @@ private slots:
     void transientAsyncProviderJob();
     void masks();
     void alphaTint();
+    void firstFramePreview();
     void animation();
     void cachePolicy();
 };
@@ -425,6 +426,43 @@ void ItemTest::alphaTint() {
     QCOMPARE(Imv::imagePipeline().submissions(), decodes);
     QCOMPARE(item.status(), Imv::ImvImage::Ready);
     qInfo() << "graphics API" << window.rendererInterface()->graphicsApi();
+}
+
+void ItemTest::firstFramePreview() {
+    QQuickWindow window;
+    window.resize(100, 80);
+    Imv::ImvImage item(window.contentItem());
+    item.setSize({64, 32});
+    item.setAnimate(false);
+    item.setPlaying(false);
+    const auto url = QUrl::fromLocalFile(IMV_FIXTURES "/animation.gif");
+    window.show();
+    QTRY_VERIFY(window.isExposed());
+    const qreal dpr = window.effectiveDevicePixelRatio();
+    const Imv::DecodeSpec spec{Imv::DecodeSpec::Pixels, {qCeil(64 * dpr), qCeil(32 * dpr)}};
+    auto &pipeline = Imv::imagePipeline();
+    Imv::Asset first;
+    auto request = pipeline.request(Imv::openSource(url), spec,
+                                    [&](Imv::Asset asset, Imv::Failure) { first = asset; });
+    QTRY_VERIFY(first);
+    QVERIFY(!first->animation.count && !first->stream);
+    const auto submissions = pipeline.submissions();
+    item.setSource(url);
+    QTRY_COMPARE(item.status(), Imv::ImvImage::Ready);
+    QCOMPARE(pipeline.submissions(), submissions);
+    const auto color = [&] {
+        const auto frame = window.grabWindow();
+        return frame.isNull() ? QColor()
+                              : frame.pixelColor(16 * frame.width() / window.width(),
+                                                 16 * frame.height() / window.height());
+    };
+    QTRY_COMPARE(color(), QColor(Qt::red));
+    item.setAnimate(true);
+    QTRY_COMPARE(item.status(), Imv::ImvImage::Ready);
+    QCOMPARE(pipeline.submissions(), submissions + 1);
+    QCOMPARE(color(), QColor(Qt::red));
+    item.setPlaying(true);
+    QTRY_COMPARE(color(), QColor(Qt::green));
 }
 
 void ItemTest::animation() {

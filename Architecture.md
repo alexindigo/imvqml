@@ -30,12 +30,13 @@ kill, but a detached retirement receiver owns the process until Qt reaps it.
 
 ## Decode and publication
 
-Only the decoder helper runs libvips. At startup it blocks libvips-marked
-untrusted operations and all foreign loaders. One table in `vips-decode.cpp`
-then enables only the `_source` loaders it uses: PNG, JPEG, GIF (nsgif),
-WebP, TIFF, SVG, HEIF/AVIF, JPEG XL. It accepts no media paths. Both backends
-receive only a nameless, seekable, sealed snapshot at most 256 MiB long.
-The helper validates this contract before selecting a backend. Unknown and non-allow-listed formats converge on
+Only the decoder helper runs libvips or Qt image readers. At startup it
+blocks libvips-marked untrusted operations and all foreign loaders, then
+reopens exactly the operations in `vips-decode.cpp`. The same allow-list
+selects named Qt readers without auto-detection. Readers receive only a
+seekable, sealed snapshot at most 256 MiB long; OpenEXR's path-only interface
+uses the helper-generated `/proc/self/fd/N` for that snapshot. No caller
+media paths reach image readers. Unknown and non-allow-listed formats converge on
 `inspect/unsupported-format`. This is crash containment, not a general OS
 sandbox. Body/schema validation remains separate from the loader policy.
 
@@ -139,7 +140,9 @@ file identity so upgrading that library breaks reuse across installs. An
 entry may hold a still, first streamed frame, small frame batch, or stable
 unsupported-format outcome. A cache epoch separates policy changes and
 explicit invalidation from in-flight work. Files are atomically replaced
-under a short directory lock; LRU eviction skips live asset leases.
+under a short directory lock. Both LRU eviction and explicit invalidation
+skip live asset leases. The worker owns explicit eviction requests through
+lock retry, enumeration and deletion, then posts one result per ticket.
 
 Freedesktop thumbnails are explicit first-frame jobs. The store worker
 encodes trusted output to a PNG in the requested standard bucket, including
@@ -151,8 +154,10 @@ queue; it remains best effort under pressure.
 
 ## Optional video
 
-The helper probes a bounded container signature only after libvips rejects
-the source. It loads libmpv dynamically and selects a restricted demuxer on
+The helper probes a bounded container signature after image recognition
+fails, or directly for a file above the image byte cap. Large videos only
+need an opened read-only descriptor; they bypass copying and disk caching.
+It loads libmpv dynamically and selects a restricted demuxer on
 the already-open descriptor. The transaction independently correlates the
 native command reply and the load or seek event followed by playback restart.
 The software renderer sees unrotated input; the helper uses source metadata

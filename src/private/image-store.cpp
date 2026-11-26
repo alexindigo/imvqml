@@ -11,7 +11,7 @@
 #include <QPointer>
 #include <QRegularExpression>
 #include <QSaveFile>
-#include <QSet>
+#include <algorithm>
 #include <cerrno>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -73,37 +73,29 @@ QFileInfoList entries(const QString &directory) {
 } // namespace
 
 struct ImageStore::Worker {
+    struct Invalidation {
+        QString directory;
+        QByteArray fingerprint;
+        Evicted done;
+        QDeadlineTimer deadline;
+
+        bool matches(const QString &dir, QByteArrayView hash) const {
+            return directory == dir && (fingerprint.isEmpty() || fingerprint == hash);
+        }
+    };
     QString directory;
     qint64 budget = 0;
     bool enabled = false;
     QByteArray version;
     quint64 epoch = 1;
     QHash<QString, std::weak_ptr<const QString>> leases;
-    QHash<QString, QSet<QByteArray>> invalidations;
-
-    // Called under the cross-process directory lock, before reading or writing
-    // any cache entries. An empty fingerprint marks the whole directory.
-    void flushInvalidations() {
-        auto pending = invalidations.find(directory);
-        if (pending == invalidations.end() || !QDir(directory).isReadable())
-            return;
-        QSet<QByteArray> failed;
-        for (const auto &file : entries(directory)) {
-            const auto fingerprint = file.fileName().first(64).toLatin1();
-            if ((pending->contains(QByteArray{}) || pending->contains(fingerprint)) &&
-                !QFile::remove(file.filePath()) && QFileInfo::exists(file.filePath()))
-                failed.insert(fingerprint);
-        }
-        if (failed.isEmpty())
-            invalidations.erase(pending);
-        else
-            *pending = std::move(failed);
-    }
+    QList<Invalidation> invalidations;
+    bool retryScheduled = false;
 
     bool invalidated(const QByteArray &fingerprint) const {
-        const auto pending = invalidations.constFind(directory);
-        return pending != invalidations.cend() &&
-               (pending->contains(QByteArray{}) || pending->contains(fingerprint));
+        return std::any_of(invalidations.cbegin(), invalidations.cend(), [&](const auto &request) {
+            return request.matches(directory, fingerprint);
+        });
     }
 
     Lease acquire(const QString &path) {
@@ -127,6 +119,7 @@ struct ImageStore::Worker {
             if (used <= budget - needed)
                 break;
             if (file.filePath() != replacing && leases.value(file.filePath()).expired() &&
+                !invalidated(file.fileName().first(64).toLatin1()) &&
                 QFile::remove(file.filePath()))
                 used -= file.size();
         }
@@ -159,10 +152,8 @@ void ImageStore::configure(QString directory, qint64 budget, bool enabled) {
             d->enabled = enabled;
             if (enabled && privateDirectory(directory)) {
                 QLockFile lock(QDir(directory).filePath(".imvqml.lock"));
-                if (lock.tryLock(0)) {
-                    d->flushInvalidations();
+                if (lock.tryLock(0))
                     d->makeSpace(0);
-                }
             }
         });
 }
@@ -201,14 +192,15 @@ void ImageStore::queueLookup(std::function<std::shared_ptr<const Fd>()> source, 
                 result.path = QDir(d->directory)
                                   .filePath(QString::fromLatin1(result.fingerprint + '-' +
                                                                 parameter + ".imvqoi"));
-                result.lease = d->acquire(result.path);
-                QLockFile lock(QDir(d->directory).filePath(".imvqml.lock"));
-                if (lock.tryLock(0)) {
-                    d->flushInvalidations();
-                    const Fd fd(d->invalidated(result.fingerprint)
-                                    ? -1
-                                    : ::open(QFile::encodeName(result.path).constData(),
-                                             O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW));
+                if (d->invalidated(result.fingerprint)) {
+                    result.path.clear();
+                } else {
+                    result.lease = d->acquire(result.path);
+                    QLockFile lock(QDir(d->directory).filePath(".imvqml.lock"));
+                    const Fd fd(lock.tryLock(0)
+                                    ? ::open(QFile::encodeName(result.path).constData(),
+                                             O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW)
+                                    : -1);
                     QFile file;
                     struct stat stat{};
                     if (fd && !::fstat(fd.get(), &stat) && S_ISREG(stat.st_mode) &&
@@ -250,7 +242,6 @@ void ImageStore::publish(Lookup lookup, Decoded decoded) {
         QLockFile lock(QDir(d->directory).filePath(".imvqml.lock"));
         if (!lock.tryLock(0))
             return;
-        d->flushInvalidations();
         if (d->invalidated(lookup.fingerprint) || !d->makeSpace(data.size(), lookup.path))
             return;
         QSaveFile file(lookup.path);
@@ -261,40 +252,102 @@ void ImageStore::publish(Lookup lookup, Decoded decoded) {
     });
 }
 
-void ImageStore::clear() { invalidate(Fd{}); }
+void ImageStore::clear(Evicted done) { queueInvalidation({}, std::move(done)); }
 
-void ImageStore::invalidate(Fd input) {
+void ImageStore::invalidate(Fd input, Evicted done) {
     // The shared wrapper keeps the callable copyable for the worker API.
     queueInvalidation(
-        [fd = std::make_shared<Fd>(std::move(input))] { return OpenedSource{std::move(*fd)}; });
+        [fd = std::make_shared<Fd>(std::move(input))] { return OpenedSource{std::move(*fd)}; },
+        std::move(done));
 }
 
-void ImageStore::invalidate(QUrl url) {
-    queueInvalidation([url = std::move(url)] { return openSource(url); });
+void ImageStore::invalidate(QUrl url, Evicted done) {
+    queueInvalidation([url = std::move(url)] { return openSource(url); }, std::move(done));
 }
 
-void ImageStore::queueInvalidation(std::function<OpenedSource()> source) {
-    m_worker.start([this, source = std::move(source), epoch = ++m_epoch] {
-        d->epoch = epoch;
-        if (d->directory.isEmpty() || !QFileInfo::exists(d->directory))
-            return;
-        const auto input = source();
-        const auto fingerprint = input.fd ? digest(input.fd) : QByteArray{};
-        if (input.error || (input.fd && fingerprint.isEmpty())) {
-            qWarning("imvqml: Could not identify source for cache invalidation");
-            return;
+void ImageStore::queueInvalidation(std::function<OpenedSource()> source, Evicted done) {
+    m_worker.start(
+        [this, source = std::move(source), done = std::move(done), epoch = ++m_epoch]() mutable {
+            d->epoch = epoch;
+            QByteArray fingerprint;
+            if (source) {
+                const auto input = source();
+                fingerprint = input.fd ? digest(input.fd) : QByteArray{};
+                if (input.error || fingerprint.isEmpty()) {
+                    finishInvalidation(std::move(done),
+                                       {0, 0, 0,
+                                        input.error ? input.error
+                                                    : Failure{"open", "unreadable",
+                                                              "Could not identify cache source"}});
+                    return;
+                }
+            }
+            d->invalidations.append({d->directory, std::move(fingerprint), std::move(done),
+                                     QDeadlineTimer(8000, Qt::PreciseTimer)});
+            flushInvalidations();
+        });
+}
+
+void ImageStore::flushInvalidations() {
+    while (!d->invalidations.isEmpty()) {
+        auto &request = d->invalidations.first();
+        Eviction result;
+        const QByteArray path = QFile::encodeName(request.directory);
+        struct stat info{};
+        if (!path.isEmpty()) {
+            if (::stat(path.constData(), &info) != 0) {
+                if (errno != ENOENT)
+                    result.error = {"store", "write-failed", "Could not access cache directory"};
+            } else if (!S_ISDIR(info.st_mode) || !QDir(request.directory).isReadable()) {
+                result.error = {"store", "write-failed", "Could not read cache directory"};
+            } else {
+                QLockFile lock(QDir(request.directory).filePath(".imvqml.lock"));
+                if (lock.tryLock(0)) {
+                    for (const auto &file : entries(request.directory)) {
+                        if (!request.matches(request.directory,
+                                             file.fileName().first(64).toLatin1()))
+                            continue;
+                        if (!d->leases.value(file.filePath()).expired())
+                            ++result.kept;
+                        else if (QFile::remove(file.filePath()))
+                            ++result.removed;
+                        else
+                            ++result.failed;
+                    }
+                    if (result.failed)
+                        result.error = {"store", "write-failed",
+                                        "Could not remove some cache entries"};
+                } else if (lock.error() != QLockFile::LockFailedError) {
+                    result.error = {"store", "write-failed", "Could not lock cache directory"};
+                } else if (request.deadline.hasExpired()) {
+                    result.error = {"store", "deadline", "Cache directory remained locked"};
+                } else {
+                    if (!std::exchange(d->retryScheduled, true))
+                        QMetaObject::invokeMethod(
+                            this,
+                            [this] {
+                                QTimer::singleShot(50, this, [this] {
+                                    m_worker.start([this] {
+                                        d->retryScheduled = false;
+                                        flushInvalidations();
+                                    });
+                                });
+                            },
+                            Qt::QueuedConnection);
+                    return;
+                }
+            }
         }
-        auto &pending = d->invalidations[d->directory];
-        if (fingerprint.isEmpty())
-            pending.clear();
-        if (!pending.contains(QByteArray{}))
-            pending.insert(fingerprint);
-        QLockFile lock(QDir(d->directory).filePath(".imvqml.lock"));
-        if (lock.tryLock(200))
-            d->flushInvalidations();
-        if (d->invalidations.contains(d->directory))
-            qWarning("imvqml: Cache invalidation pending; affected entries will not be reused");
-    });
+        auto completed = d->invalidations.takeFirst();
+        finishInvalidation(std::move(completed.done), std::move(result));
+    }
+}
+
+void ImageStore::finishInvalidation(Evicted done, Eviction result) {
+    if (done)
+        QMetaObject::invokeMethod(
+            this, [done = std::move(done), result = std::move(result)] { done(result); },
+            Qt::QueuedConnection);
 }
 
 QString thumbnailBucket(int size) {

@@ -20,6 +20,13 @@ public:
         std::optional<Decoded> value;
         quint64 epoch = 0;
     };
+    struct Eviction {
+        qsizetype removed = 0;
+        qsizetype kept = 0;
+        qsizetype failed = 0;
+        Failure error;
+    };
+    using Evicted = std::function<void(Eviction)>;
     static constexpr qint64 DefaultBudget = 512ll * 1024 * 1024;
     explicit ImageStore(QByteArray version, QObject *parent = nullptr);
     ~ImageStore() override;
@@ -27,9 +34,9 @@ public:
     void lookup(Fd input, DecodeSpec spec, std::function<void(Lookup)> done);
     void lookup(std::weak_ptr<const Fd> input, DecodeSpec spec, std::function<void(Lookup)> done);
     void publish(Lookup lookup, Decoded decoded);
-    void clear();
-    void invalidate(Fd input);
-    void invalidate(QUrl url);
+    void clear(Evicted done = {});
+    void invalidate(Fd input, Evicted done = {});
+    void invalidate(QUrl url, Evicted done = {});
     bool enabled() const { return m_enabled; }
     quint64 epoch() const { return m_epoch; }
     void thumbnail(QString path, struct stat revision, QImage pixels, SourceInfo info, int size,
@@ -57,7 +64,9 @@ private:
     void finishThumbnail(Thumbnail request, Failure failure, QUrl output = {});
     void queueLookup(std::function<std::shared_ptr<const Fd>()> source, DecodeSpec spec,
                      std::function<void(Lookup)> done);
-    void queueInvalidation(std::function<OpenedSource()> source);
+    void queueInvalidation(std::function<OpenedSource()> source, Evicted done);
+    void flushInvalidations();
+    void finishInvalidation(Evicted done, Eviction result);
     quint64 m_epoch = 1;
     bool m_enabled = false;
 };

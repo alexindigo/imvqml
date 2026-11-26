@@ -1,7 +1,8 @@
 # Verification (guest only)
 
 Run in the owned `imvqml-dev` virtual machine on ark, with Qt Test and
-bubblewrap, Python 3, libzstd and ImageMagick with the listed codec writers
+bubblewrap, Python 3 with Pillow (including WebP), libzstd, FFmpeg, the vips
+CLI with the listed codecs, and the Qt image plugins from the format table
 installed for `BUILD_TESTING=ON`. `TMPDIR` below is on the guest
 disk, outside both the original source and build trees:
 

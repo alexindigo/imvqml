@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 #include "vips-decode.h"
+#include <QColorSpace>
+#include <QFile>
+#include <QImageIOHandler>
+#include <QImageReader>
 #include <QtEndian>
 
 #include <cerrno>
@@ -12,13 +16,20 @@
 namespace Imv {
 namespace {
 
+enum class Input { Source, DescriptorPath, Qt };
+
 struct Loader {
     const char *type;
     const char *operation;
     const char *format;
+    Input input = Input::Source;
+    QByteArrayView signature{};
 };
 
-// This is both the admission list and the only place enabling libvips loaders.
+// The only decoder allow-list. libvips' default block on untrusted operations
+// stays on; these exact foreign operations are intentional helper-only
+// exceptions (in particular PNM, JPEG 2000, HDR and EXR). Qt readers receive
+// an explicit key; they do not probe arbitrary plugins on untrusted input.
 constexpr Loader Loaders[] = {
     {"VipsForeignLoadPngSource", "pngload_source", "png"},
     {"VipsForeignLoadJpegSource", "jpegload_source", "jpeg"},
@@ -28,6 +39,15 @@ constexpr Loader Loaders[] = {
     {"VipsForeignLoadSvgSource", "svgload_source", "svg"},
     {"VipsForeignLoadHeifSource", "heifload_source", "heif"},
     {"VipsForeignLoadJxlSource", "jxlload_source", "jxl"},
+    {"VipsForeignLoadPpmSource", "ppmload_source", "ppm"},
+    {"VipsForeignLoadJp2kSource", "jp2kload_source", "jp2"},
+    {"VipsForeignLoadRadSource", "radload_source", "hdr"},
+    {"VipsForeignLoadOpenexr", "openexrload", "exr", Input::DescriptorPath, "\x76\x2f\x31\x01"},
+    {nullptr, "bmp", "bmp", Input::Qt, "BM"},
+    {nullptr, "ico", "ico", Input::Qt, QByteArrayView("\0\0\1\0", 4)},
+    {nullptr, "icns", "icns", Input::Qt, "icns"},
+    {nullptr, "dds", "dds", Input::Qt, "DDS "},
+    {nullptr, "tga", "tga", Input::Qt},
 };
 
 struct Unref {
@@ -90,6 +110,96 @@ bool avif(int input) {
     return false;
 }
 
+bool isTga(int fd, QByteArrayView head, qint64 length) {
+    constexpr QByteArrayView footer("TRUEVISION-XFILE.\0", 18);
+    char tail[footer.size()];
+    if (length >= 44 && ::pread(fd, tail, sizeof tail, length - sizeof tail) == sizeof tail &&
+        QByteArrayView(tail, sizeof tail) == footer)
+        return true;
+    // TGA 1.0 has no magic. Only try the reader for plausible headers;
+    // reserved types, invalid depth and impossible data offsets are excluded.
+    if (head.size() < 18)
+        return false;
+    const auto *h = reinterpret_cast<const uchar *>(head.data());
+    const int kind = h[2] & ~8;
+    const bool depth = (kind == 1 && (h[16] == 8 || h[16] == 16)) ||
+                       (kind == 2 && (h[16] == 15 || h[16] == 16 || h[16] == 24 || h[16] == 32)) ||
+                       (kind == 3 && (h[16] == 8 || h[16] == 16));
+    const int colors = qFromLittleEndian<quint16>(h + 5);
+    return depth && !(h[17] & 0xc0) && qFromLittleEndian<quint16>(h + 12) &&
+           qFromLittleEndian<quint16>(h + 14) &&
+           (kind == 1 ? (h[1] == 1 && colors && h[7] >= 15 && h[7] <= 32) : h[1] == 0) &&
+           length > 18 + h[0] + (kind == 1 ? colors * ((h[7] + 7) / 8) : 0);
+}
+
+DecodeReport decodeWithQt(const Loader &loader, int input, int output, const DecodeSpec &spec) {
+    QFile file;
+    if (!file.open(input, QIODevice::ReadOnly) || !file.seek(0))
+        return fail(DecodeCode::Unreadable, "Could not open the image descriptor");
+    QImageReader reader(&file, loader.operation);
+    reader.setAutoDetectImageFormat(false);
+    reader.setAutoTransform(true);
+    if (!reader.canRead()) {
+        const auto code = reader.error() == QImageReader::UnsupportedFormatError
+                              ? DecodeCode::Unsupported
+                              : DecodeCode::InvalidHeader;
+        return fail(code, reader.errorString());
+    }
+    const auto dimensions = reader.size();
+    if (dimensions.isValid() && qint64(dimensions.width()) * dimensions.height() > MaxSourcePixels)
+        return fail(DecodeCode::PixelLimit, "Source frame exceeds 64 MiPixels");
+    // Some readers cannot report the header dimensions independently (e.g.
+    // ICNS). Qt's allocation limit and the helper address-space limit still
+    // apply to the first decode, including metadata-only requests.
+    QImage pixels;
+    if (spec.mode != DecodeSpec::Inspect || !dimensions.isValid()) {
+        pixels = reader.read();
+        if (pixels.isNull())
+            return fail(dimensions.isValid() ? DecodeCode::Decode : DecodeCode::InvalidHeader,
+                        reader.errorString());
+        if (qint64(pixels.width()) * pixels.height() > MaxSourcePixels)
+            return fail(DecodeCode::PixelLimit, "Source frame exceeds 64 MiPixels");
+    }
+    auto size = pixels.isNull() ? dimensions : pixels.size();
+    if (pixels.isNull() && (reader.transformation() & QImageIOHandler::TransformationRotate90))
+        size.transpose();
+    if (size.isEmpty())
+        return fail(DecodeCode::InvalidHeader, "Nonpositive image dimensions");
+    DecodeReport report;
+    report.source = {QString::fromLatin1(loader.format), size, 1, 1};
+    if (spec.mode == DecodeSpec::Inspect)
+        return report;
+    if (spec.mode == DecodeSpec::FrameAt)
+        return fail(DecodeCode::Decode, "Source has no animation timing");
+    auto target = spec.bounds;
+    if (spec.scale == DecodeSpec::Cover) {
+        target = target.scaled(size.boundedTo(target), Qt::KeepAspectRatio).expandedTo({1, 1});
+        const auto scaled = pixels.size().scaled(target, Qt::KeepAspectRatioByExpanding);
+        // Crop first so a tiny output never allocates an oversized intermediary.
+        if (scaled != target) {
+            const auto crop = target.scaled(size, Qt::KeepAspectRatio).expandedTo({1, 1});
+            pixels = pixels.copy((size.width() - crop.width()) / 2,
+                                 (size.height() - crop.height()) / 2, crop.width(), crop.height());
+        }
+    } else if (spec.scale == DecodeSpec::Stretch) {
+        target = target.boundedTo(size);
+    } else {
+        target = size.scaled(size.boundedTo(target), Qt::KeepAspectRatio).expandedTo({1, 1});
+    }
+    if (pixels.colorSpace().isValid() && pixels.colorSpace() != QColorSpace::SRgb)
+        pixels.convertToColorSpace(QColorSpace::SRgb);
+    pixels = pixels.scaled(target, Qt::IgnoreAspectRatio, Qt::SmoothTransformation)
+                 .convertToFormat(QImage::Format_RGBA8888);
+    report.output = pixels.size();
+    const auto bytes = rgbaBytes(report.output);
+    if (bytes <= 0 || report.output.width() > spec.bounds.width() ||
+        report.output.height() > spec.bounds.height() || pixels.sizeInBytes() != bytes)
+        return fail(DecodeCode::Output, "Output geometry is out of bounds");
+    if (!writeAll(output, reinterpret_cast<const char *>(pixels.constBits()), bytes, 0))
+        return fail(DecodeCode::Output, "Could not write RGBA pixels");
+    return report;
+}
+
 } // namespace
 
 bool initializeVips(const char *program) {
@@ -100,11 +210,13 @@ bool initializeVips(const char *program) {
     vips_block_untrusted_set(TRUE);
     vips_operation_block_set("VipsForeignLoad", TRUE);
     for (const auto &loader : Loaders)
-        vips_operation_block_set(loader.type, FALSE);
+        if (loader.type)
+            vips_operation_block_set(loader.type, FALSE);
+    QImageReader::setAllocationLimit(int(MaxSourcePixels * 4 / (1024 * 1024)));
     return true;
 }
 
-DecodeReport decodeWithVips(int input, int output, const DecodeSpec &spec, qint64 length) {
+DecodeReport decodeImage(int input, int output, const DecodeSpec &spec, qint64 length) {
     if (length <= 0)
         return fail(DecodeCode::InvalidHeader, "Empty source");
 
@@ -113,9 +225,20 @@ DecodeReport decodeWithVips(int input, int output, const DecodeSpec &spec, qint6
     Source source(VIPS_SOURCE(custom));
     g_signal_connect(custom, "read", G_CALLBACK(ReadCap::read), &cap);
     g_signal_connect(custom, "seek", G_CALLBACK(ReadCap::seek), &cap);
+    char buffer[18];
+    const auto prefixSize = ::pread(input, buffer, sizeof buffer, 0);
+    if (prefixSize < 0)
+        return fail(DecodeCode::Unreadable, "Could not read the image signature");
+    const QByteArrayView head(buffer, prefixSize);
     const Loader *loader = nullptr;
     for (const auto &candidate : Loaders) {
-        if (vips_foreign_is_a_source(candidate.operation, source.get())) {
+        const bool recognized =
+            candidate.input == Input::Source
+                ? !vips_source_rewind(source.get()) &&
+                      vips_foreign_is_a_source(candidate.operation, source.get())
+            : !candidate.signature.empty() ? head.startsWith(candidate.signature)
+                                           : isTga(input, head, length);
+        if (recognized) {
             loader = &candidate;
             break;
         }
@@ -123,11 +246,22 @@ DecodeReport decodeWithVips(int input, int output, const DecodeSpec &spec, qint6
     }
     if (!loader)
         return fail(DecodeCode::Unsupported, "No allowed decoder recognizes this source");
+    if (loader->input == Input::Qt)
+        return decodeWithQt(*loader, input, output, spec);
 
     VipsImage *raw = nullptr;
-    if (vips_source_rewind(source.get()) ||
-        vips_call(loader->operation, source.get(), &raw, "access", VIPS_ACCESS_SEQUENTIAL,
-                  "fail_on", VIPS_FAIL_ON_ERROR, nullptr))
+    // OpenEXR has no libvips source loader. The path is generated from the
+    // already-validated, sealed descriptor, never from a supplied filename.
+    const auto path = "/proc/self/fd/" + QByteArray::number(input);
+    const bool descriptorPath = loader->input == Input::DescriptorPath;
+    const auto status =
+        descriptorPath
+            ? vips_call(loader->operation, path.constData(), &raw, "access", VIPS_ACCESS_SEQUENTIAL,
+                        "fail_on", VIPS_FAIL_ON_ERROR, nullptr)
+            : vips_source_rewind(source.get()) ||
+                  vips_call(loader->operation, source.get(), &raw, "access", VIPS_ACCESS_SEQUENTIAL,
+                            "fail_on", VIPS_FAIL_ON_ERROR, nullptr);
+    if (status)
         return fail(DecodeCode::InvalidHeader, "Could not inspect image header", true);
     Image image(raw);
     QSize size(vips_image_get_width(raw), vips_image_get_page_height(raw));
@@ -138,7 +272,9 @@ DecodeReport decodeWithVips(int input, int output, const DecodeSpec &spec, qint6
     const int orientation = vips_image_get_orientation(raw);
     if (orientation >= 5 && orientation <= 8)
         size.transpose();
-    const int pages = qMax(1, vips_image_get_n_pages(raw));
+    // JPEG 2000 exposes resolution reductions as pages, not frames.
+    const int pages =
+        QByteArrayView(loader->format) == "jp2" ? 1 : qMax(1, vips_image_get_n_pages(raw));
     int loop = 1;
     if (pages > 1 && vips_image_get_typeof(raw, "loop")) {
         int count = 0;
@@ -171,12 +307,17 @@ DecodeReport decodeWithVips(int input, int output, const DecodeSpec &spec, qint6
     const auto thumbnail = [&](int page) -> Image {
         // Always request one composited page; never construct a full-height stack.
         const auto options = page ? "page=" + QByteArray::number(page) + ",n=1" : QByteArray{};
-        if (vips_source_rewind(source.get()) ||
-            vips_thumbnail_source(
-                source.get(), &raw, target.width(), "height", target.height(), "crop",
-                spec.scale == DecodeSpec::Cover ? VIPS_INTERESTING_CENTRE : VIPS_INTERESTING_NONE,
-                "size", spec.scale == DecodeSpec::Stretch ? VIPS_SIZE_FORCE : VIPS_SIZE_DOWN,
-                "fail_on", VIPS_FAIL_ON_ERROR, "option-string", options.constData(), nullptr))
+        const auto crop =
+            spec.scale == DecodeSpec::Cover ? VIPS_INTERESTING_CENTRE : VIPS_INTERESTING_NONE;
+        const auto scale = spec.scale == DecodeSpec::Stretch ? VIPS_SIZE_FORCE : VIPS_SIZE_DOWN;
+        if (descriptorPath
+                ? vips_thumbnail_image(image.get(), &raw, target.width(), "height", target.height(),
+                                       "crop", crop, "size", scale, nullptr)
+                : vips_source_rewind(source.get()) ||
+                      vips_thumbnail_source(source.get(), &raw, target.width(), "height",
+                                            target.height(), "crop", crop, "size", scale, "fail_on",
+                                            VIPS_FAIL_ON_ERROR, "option-string",
+                                            options.constData(), nullptr))
             return {};
         Image frame(raw);
         if (vips_colourspace(frame.get(), &raw, VIPS_INTERPRETATION_sRGB, nullptr))

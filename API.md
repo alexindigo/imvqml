@@ -5,6 +5,29 @@ directory to the QML import path (replace `lib` with CMake's install libdir).
 C++ consumers use `find_package(imvqml 0.1 CONFIG REQUIRED)` and link
 `imvqml::imvqml`; the header is `<imvqml/imvimagejob.h>`.
 
+## Encoded formats
+
+Detection uses content rather than filenames. These readers run only in
+`imvqml-decoder`; no encoded image is decoded by the application or ImageMagick.
+
+| Extensions | Helper reader |
+| --- | --- |
+| `jpg`, `jpeg`, `png`, `gif`, `webp`, `tiff`, `tif` | libvips |
+| `avif`, `heic`, `heif`, `jxl` | libvips with libheif or libjxl |
+| `svg`, `svgz` | libvips with librsvg |
+| `pnm`, `pgm`, `ppm`, `pbm` | libvips PNM (`sourceInfo.format: "ppm"`) |
+| `jp2`, `j2k` | libvips with OpenJPEG (`sourceInfo.format: "jp2"`) |
+| `exr`, `hdr` | libvips with OpenEXR and the Radiance loader |
+| `bmp`, `ico` | Qt Gui and its ICO reader |
+| `icns`, `tga` | Qt `QImageReader`, `qt6-imageformats` on Arch |
+| `dds` | Qt `QImageReader`, `kimageformats` with DDS enabled |
+
+Encoded images are limited to 256 MiB and 64 MiPixels per source frame. For
+large local videos the helper streams the opened regular file instead of
+copying it into memory. The encoded image cap does not apply to video; the
+deadline, frame size and helper address-space limits still do. Large local
+video frames bypass the persistent pixel cache.
+
 ## Display item
 
 `ImvImage` (`<imvqml/imvimage.h>` in C++) is a Qt Quick item. Set its
@@ -65,10 +88,22 @@ When compatible libmpv is unavailable, video yields
 `ImvCache` (`<imvqml/imvcache.h>` in C++) has process-wide policy:
 `enabled` (default false), `directory` (an absolute local path; default
 `$XDG_CACHE_HOME/imvqml` or `~/.cache/imvqml`), and `byteBudget` (512 MiB).
-`clear()` clears the store; `invalidate(source)` removes entries for the
-current contents of a local file or data URL. Both affect subsequent display
-requests without clearing pixels from live items. Store misses or corrupt
-entries fall back to the decoder. The store never fetches a network source.
+`clear()` removes owned entries from the configured store;
+`invalidate(source)` targets entries for the current contents of a local file
+or data URL. Both return a positive ticket immediately (`-3` on ticket
+exhaustion, with no signal). `cleared(ticket, result)` is emitted once, queued
+on the calling `ImvCache`, after the worker has settled eviction. Files still
+leased by live items are protected. Neither operation clears pixels from
+those items or touches freedesktop thumbnail exports.
+
+The result contains `stage`, `code`, `detail`, and integer counts `removed`,
+`kept` (leased entries), and `failed` (entries that could not be removed).
+Success has `stage: "complete"` and empty `code` and `detail`. A busy directory
+lock is retried; if it stays locked the result is `store/deadline`. On an
+operation-level error before enumeration the entry counts are zero.
+The counts describe this operation, not files written by later requests.
+Store misses or corrupt entries fall back to the decoder. The store never
+fetches a network source.
 
 `exportThumbnail(source, size = 128)` is an explicit local-file export, even
 if the private pixel store is off. `size` selects one of the freedesktop

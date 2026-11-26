@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 // Native transaction adapted from mpvqml v0.3.0, mpvframecapture.cpp.
 #include "video-decode.h"
+#include "private/video-signature.h"
 
 #include <unistd.h>
 
@@ -18,21 +19,9 @@
 namespace Imv {
 namespace {
 const char *videoDemuxer(int input) {
-    char header[16];
+    char header[VideoSignatureBytes];
     const auto size = ::pread(input, header, sizeof header, 0);
-    if (size < 12)
-        return nullptr;
-    const QByteArrayView signature(header, size);
-    if (signature.startsWith(QByteArrayView("\x1a\x45\xdf\xa3", 4)))
-        return "matroska";
-    const auto box = signature.sliced(4, 4);
-    if (box == "ftyp" || box == "moov" || box == "mdat" || box == "wide")
-        return "mov";
-    if (signature.startsWith("RIFF") && signature.sliced(8, 4) == "AVI ")
-        return "avi";
-    if (signature.startsWith("OggS"))
-        return "ogg";
-    return nullptr;
+    return size < 0 ? nullptr : Imv::videoDemuxer(QByteArrayView(header, size));
 }
 
 #ifdef IMV_HAVE_MPV_HEADERS

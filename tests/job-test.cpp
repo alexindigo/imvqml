@@ -63,6 +63,13 @@ private slots:
         QTest::newRow("HEIC") << QString("heic") << QString("heif");
         QTest::newRow("AVIF") << QString("avif") << QString("avif");
         QTest::newRow("JPEG XL") << QString("jxl") << QString("jxl");
+        const std::pair<const char *, const char *> extra[] = {
+            {"jpeg", "jpeg"}, {"tif", "tiff"}, {"heif", "heif"}, {"svgz", "svg"}, {"bmp", "bmp"},
+            {"pnm", "ppm"},   {"ppm", "ppm"},  {"pgm", "ppm"},   {"pbm", "ppm"},  {"ico", "ico"},
+            {"icns", "icns"}, {"jp2", "jp2"},  {"j2k", "jp2"},   {"exr", "exr"},  {"hdr", "hdr"},
+            {"dds", "dds"},   {"tga", "tga"}};
+        for (const auto &[ext, format] : extra)
+            QTest::newRow(ext) << QString(ext) << QString(format);
     }
     void formats() {
         QFETCH(QString, extension);
@@ -78,14 +85,20 @@ private slots:
         const auto metadata = info.value("sourceInfo").toMap();
         QCOMPARE(metadata.value("format").toString(), format);
         QCOMPARE(metadata.value("width").toInt(), 64);
-        QCOMPARE(metadata.value("height").toInt(), 32);
+        const bool square = extension == "ico" || extension == "icns";
+        QCOMPARE(metadata.value("height").toInt(), square ? 64 : 32);
         QCOMPARE(metadata.value("frames").toInt(), 1);
         const auto sampled = result(spy, job.sample(url, 20, 12));
         QVERIFY2(sampled.value("code").toString().isEmpty(),
                  qPrintable(sampled.value("detail").toString()));
         auto image = pixels(sampled);
-        QCOMPARE(image.size(), QSize(20, 10));
-        const auto red = image.pixelColor(3, 4), green = image.pixelColor(16, 4);
+        QCOMPARE(image.size(), square ? QSize(12, 12) : QSize(20, 10));
+        const auto red = image.pixelColor(3, 4), green = image.pixelColor(image.width() - 4, 4);
+        if (extension == "pgm" || extension == "pbm") {
+            QCOMPARE(red, QColor(Qt::white));
+            QCOMPARE(green, QColor(Qt::black));
+            return;
+        }
         QVERIFY(red.red() > 215 && red.green() < 35 && red.blue() < 35 && red.alpha() == 255);
         QVERIFY(green.green() > 215 && green.red() < 35 && green.blue() < 35 &&
                 green.alpha() == 255);
@@ -180,14 +193,17 @@ private slots:
         QTest::addColumn<QString>("name");
         QTest::addColumn<QString>("stage");
         QTest::addColumn<QString>("code");
-        QTest::newRow("PPM blocked")
-            << QString("palette.ppm") << QString("inspect") << QString("unsupported-format");
         QTest::newRow("FITS blocked")
             << QString("palette.fits") << QString("inspect") << QString("unsupported-format");
         QTest::newRow("unrecognized")
             << QString("garbage") << QString("inspect") << QString("unsupported-format");
         QTest::newRow("broken header")
             << QString("broken.png") << QString("inspect") << QString("invalid-image");
+        for (const auto *ext : {"bmp", "ico", "icns", "dds", "exr", "hdr", "jp2", "tga", "svgz"})
+            QTest::newRow(ext) << (QString("broken.") + ext) << QString("inspect")
+                               << QString("invalid-image");
+        QTest::newRow("truncated PPM pixels")
+            << QString("broken.ppm") << QString("decode") << QString("invalid-image");
         QTest::newRow("source bytes")
             << QString("large-source") << QString("admission") << QString("too-large");
         QTest::newRow("header pixels")

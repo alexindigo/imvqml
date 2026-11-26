@@ -17,6 +17,7 @@ inline constexpr int MemfdSeals = 0x0f; // SEAL, SHRINK, GROW, WRITE
 struct DecodeSpec {
     enum Mode : int { Inspect, Pixels } mode = Inspect;
     QSize bounds{0, 0};
+    enum Scale : int { Contain, Cover, Stretch } scale = Contain;
     bool valid() const;
 };
 

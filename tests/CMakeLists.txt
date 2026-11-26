@@ -30,6 +30,23 @@ add_dependencies(imv-job-test imvqml-decoder)
 add_test(NAME jobs COMMAND imv-job-test)
 set_tests_properties(jobs PROPERTIES FIXTURES_REQUIRED images TIMEOUT 30)
 
+add_executable(imv-pipeline-test pipeline-test.cpp)
+target_include_directories(imv-pipeline-test PRIVATE ${PROJECT_SOURCE_DIR}/src/private)
+target_link_libraries(imv-pipeline-test PRIVATE imvqml Qt6::Test)
+target_compile_definitions(imv-pipeline-test PRIVATE IMV_FIXTURES="${fixtures}")
+add_dependencies(imv-pipeline-test imvqml-decoder)
+add_test(NAME pipeline COMMAND imv-pipeline-test)
+set_tests_properties(pipeline PROPERTIES FIXTURES_REQUIRED images TIMEOUT 25)
+
+add_executable(imv-item-test item-test.cpp)
+target_include_directories(imv-item-test PRIVATE ${PROJECT_SOURCE_DIR}/src/private)
+target_link_libraries(imv-item-test PRIVATE imvqml Qt6::Quick Qt6::Test)
+target_compile_definitions(imv-item-test PRIVATE IMV_FIXTURES="${fixtures}"
+    IMV_IMPORT_PATH="${stage}/${qml_dir}")
+add_dependencies(imv-item-test imvqmlplugin imvqml-decoder)
+add_test(NAME items COMMAND imv-item-test)
+set_tests_properties(items PROPERTIES FIXTURES_REQUIRED images LABELS wayland TIMEOUT 40)
+
 pkg_check_modules(ZSTD REQUIRED IMPORTED_TARGET libzstd)
 add_executable(imv-store-benchmark store-benchmark.cpp)
 target_link_libraries(imv-store-benchmark PRIVATE Qt6::Gui PkgConfig::WEBP PkgConfig::ZSTD)

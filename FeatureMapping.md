@@ -8,3 +8,5 @@
 | `ImvImageJob` | Headless inspect/sample/render, queued ticket result and no-clobber publication | `jobs`, `installed-sample`: metadata, actual output pixels, alpha, EXIF, error stages, cancellation and PNG/WebP publication |
 | libvips helper | Explicit loader set, bounded source and geometry, validated sealed pixels | `jobs`: nine format fixtures, blocked PPM/FITS, malformed and oversized inputs, recovery |
 | Persistent storage format | QOI, selected by timing before store implementation | [Measured comparison](tests/store-format.md), `imv-store-benchmark` |
+| `ImvImage` / private pipeline | Physical-size requests, owned sources, coalescing, cancellable interests and stale-delivery guards | `pipeline`: admitted cancellation and surviving shared interest; `items`: same-size coalescing, resize threshold, superseded source and provider/byte pixels |
+| Render-thread texture cache | Per-graph leases and byte-budgeted LRU | `items`: niri window pixels with one decode and one texture across two items, then reuse without a decode or texture creation |

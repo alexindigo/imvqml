@@ -1,7 +1,8 @@
 # imvqml
 
-Qt 6 / QML image pipeline for Linux. `ImvImageJob` inspects, samples or
-exports local images without a display. Source decoding runs in a separate
+Qt 6 / QML image pipeline for Linux. `ImvImage` displays images with shared
+textures; `ImvImageJob` inspects, samples or exports local images without a
+display. Source decoding runs in a separate
 libvips helper. See [API](API.md), [architecture](Architecture.md),
 [feature mapping](FeatureMapping.md) and [upstream notes](UPSTREAM.md).
 

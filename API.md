@@ -5,6 +5,32 @@ directory to the QML import path (replace `lib` with CMake's install libdir).
 C++ consumers use `find_package(imvqml 0.1 CONFIG REQUIRED)` and link
 `imvqml::imvqml`; the header is `<imvqml/imvimagejob.h>`.
 
+## Display item
+
+`ImvImage` (`<imvqml/imvimage.h>` in C++) is a Qt Quick item. Set its
+width and height explicitly or with anchors. Its `source` is a path, local
+`file:` URL, `data:` URL, or `image://provider/id`; `setBytes(bytes)` replaces
+the URL with owned encoded bytes. Network URLs are rejected. Qt image
+providers must return CPU-readable pixels; a GPU-only texture is not a byte
+source. Synchronous provider functions run on the GUI thread; async image
+responses are supported. No new codec runs in the application for providers.
+
+| Property | Behavior |
+|---|---|
+| `fillMode` | `ImvImage.Contain` (default), `Cover` (center crop), or `Stretch` |
+| `mask`, `radius` | `NoMask` (default), `Circle` (inscribed), or `Rounded` with a radius in logical pixels |
+| `smooth` | Inherited Qt Quick texture filtering, true by default |
+| `status` | `Idle` for no source, `Loading` awaiting size/decode/texture, `Ready` after scene-graph texture creation, or `Failed` |
+| `sourceInfo` | `format`, oriented `width` and `height`, `frames`, `loop`; empty before an accepted result |
+| `errorStage`, `errorCode`, `errorDetail` | The same failure vocabulary as jobs, plus `upload/texture-failed` |
+
+The request size is the item size times the window DPR, rounded up. Per-edge
+resize jitter below the greater of 4 physical pixels and one eighth of the
+previous requested edge reuses the prior decode. Old pixels can stay visible
+during a resize but are dropped on source or fill-mode changes. The still
+lane uses the first frame; the `animate` and `playing` flags are consumed by
+the animation lane in unit 5.
+
 ## Image jobs
 
 `ImvImageJob` needs no display or window. Its methods accept local paths,

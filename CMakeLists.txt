@@ -9,7 +9,7 @@ endif()
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 include(CTest)
-find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Qml)
+find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Qml Quick)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(VIPS REQUIRED IMPORTED_TARGET vips>=8.14)
 pkg_check_modules(WEBP REQUIRED IMPORTED_TARGET libwebp)
@@ -40,12 +40,14 @@ qt_add_qml_module(imvqml URI ImvQml VERSION 1.0
     NO_PLUGIN_OPTIONAL
     OUTPUT_DIRECTORY "${stage}/${qml_dir}/ImvQml"
     SOURCES src/include/imvqml/imvimagejob.h src/imvimagejob.cpp src/private/helper.cpp
-        src/private/pool.cpp src/private/pool.h src/private/decode-client.cpp src/private/export.cpp)
+        src/private/pool.cpp src/private/pool.h src/private/decode-client.cpp src/private/export.cpp
+        src/include/imvqml/imvimage.h src/imvimage.cpp src/private/image-pipeline.cpp
+        src/private/image-node.cpp src/private/image-provider.cpp)
 target_include_directories(imvqml PUBLIC
     "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/include>"
     "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
     PRIVATE src/include/imvqml)
-target_link_libraries(imvqml PUBLIC Qt6::Core Qt6::QmlIntegration
+target_link_libraries(imvqml PUBLIC Qt6::Core Qt6::QmlIntegration Qt6::Quick
     PRIVATE Qt6::Gui Qt6::Qml imv-wire PkgConfig::WEBP ${CMAKE_DL_LIBS})
 target_compile_definitions(imvqml PRIVATE IMV_DECODER_FROM_LIB="${decoder_from_lib}")
 set_target_properties(imvqml PROPERTIES VERSION "${PROJECT_VERSION}" SOVERSION 0

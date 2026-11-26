@@ -161,10 +161,18 @@ DecodeReport decodeWithVips(int input, int output, const DecodeSpec &spec) {
     // The source is rewindable and nameless; discovery can only build one
     // of the enabled _source operations. Only the first page is read here.
     image.reset();
+    auto target = spec.bounds;
+    if (spec.scale == DecodeSpec::Cover) {
+        target = target.scaled(size.boundedTo(target), Qt::KeepAspectRatio).expandedTo({1, 1});
+    } else if (spec.scale == DecodeSpec::Stretch) {
+        target = target.boundedTo(size);
+    }
     if (vips_source_rewind(source.get()) ||
-        vips_thumbnail_source(source.get(), &raw, spec.bounds.width(), "height",
-                              spec.bounds.height(), "size", VIPS_SIZE_DOWN, "fail_on",
-                              VIPS_FAIL_ON_ERROR, nullptr))
+        vips_thumbnail_source(
+            source.get(), &raw, target.width(), "height", target.height(), "crop",
+            spec.scale == DecodeSpec::Cover ? VIPS_INTERESTING_CENTRE : VIPS_INTERESTING_NONE,
+            "size", spec.scale == DecodeSpec::Stretch ? VIPS_SIZE_FORCE : VIPS_SIZE_DOWN, "fail_on",
+            VIPS_FAIL_ON_ERROR, nullptr))
         return fail(DecodeCode::Decode, "Could not thumbnail image", true);
     image.reset(raw);
     if (vips_colourspace(image.get(), &raw, VIPS_INTERPRETATION_sRGB, nullptr))

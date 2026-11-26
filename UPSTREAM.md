@@ -23,3 +23,7 @@
   phoboslab/qoi commit `ffb2d2cb74a1de60819b21b939f7209aa53e91c1`, in
   `tests/vendor/qoi.h` with one blank line's trailing tabs removed. It is
   not part of the library.
+- The display path uses Qt Quick's public scene-graph APIs. `QQuickWindow`
+  creates the texture at scene-graph sync and signals invalidation on the
+  render thread; no Qt private API or platform GL context is used. Verified
+  with Qt 6.12's threaded OpenGL RHI in the guest niri session.

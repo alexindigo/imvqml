@@ -36,6 +36,22 @@ Showing it again resumes at the playhead if `playing` is still true. Finite
 animations stop on the final frame. Multi-page images with no frame timing
 stay on their first page. Image jobs always select the first frame.
 
+## Cache policy and thumbnails
+
+`ImvCache` (`<imvqml/imvcache.h>` in C++) has process-wide policy:
+`enabled` (default false), `directory` (an absolute local path; default
+`$XDG_CACHE_HOME/imvqml` or `~/.cache/imvqml`), and `byteBudget` (512 MiB).
+`clear()` clears the store; `invalidate(source)` removes entries for the
+current contents of a local file or data URL. Both affect subsequent display
+requests without clearing pixels from live items. Store misses or corrupt
+entries fall back to the decoder. The store never fetches a network source.
+
+`exportThumbnail(source, size = 128)` is an explicit local-file export, even
+if the private pixel store is off. `size` selects one of the freedesktop
+buckets: 128, 256, 512, or 1024. A positive ticket yields
+`thumbnailFinished(id, result)` with `stage`, `code`, `detail`, and on success
+`destination`. The output is an atomic PNG with original URI and mtime.
+
 ## Image jobs
 
 `ImvImageJob` needs no display or window. Its methods accept local paths,

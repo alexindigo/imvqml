@@ -14,6 +14,7 @@ class ItemTest : public QObject {
 private slots:
     void display();
     void animation();
+    void cachePolicy();
 };
 
 class TestProvider : public QQuickImageProvider {
@@ -152,6 +153,24 @@ void ItemTest::animation() {
     }
     QTest::qWait(900);
     QCOMPARE(color(), QColor(Qt::yellow));
+}
+
+void ItemTest::cachePolicy() {
+    QQmlEngine engine;
+    engine.addImportPath(IMV_IMPORT_PATH);
+    QQmlComponent component(&engine);
+    component.setData(R"(
+import QtQml
+import ImvQml
+QtObject { property bool enabled: ImvCache.enabled; property double budget: ImvCache.byteBudget }
+)",
+                      QUrl());
+    QTRY_VERIFY(!component.isLoading());
+    QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+    std::unique_ptr<QObject> object(component.create());
+    QVERIFY(object);
+    QCOMPARE(object->property("enabled"), false);
+    QCOMPARE(object->property("budget").toLongLong(), 512ll * 1024 * 1024);
 }
 
 QTEST_MAIN(ItemTest)

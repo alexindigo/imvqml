@@ -87,3 +87,20 @@ The decoder reparses the encoded source as needed; decoded pixels do not
 grow with the frame count. Timers own delay, loop and pause state; the item
 passes visibility and play intent. Paused streams retire their helper and
 lookahead after a grace period; they do not take still-pool capacity.
+
+## Persistent store
+
+One serial store worker owns content hashing, QOI envelope validation,
+publication and eviction. Keys pair SHA-256 of the opened content with
+decode parameters and the imvqml build version, libvips version and loader
+implementation fingerprint. The key also includes the system SDK libvips
+file identity so upgrading that library breaks reuse across installs. An
+entry may hold a still, first streamed frame, small frame batch, or stable
+unsupported-format outcome. A cache epoch separates policy changes and
+explicit invalidation from in-flight work. Files are atomically replaced
+under a short directory lock; LRU eviction skips live asset leases.
+
+Freedesktop thumbnails are explicit first-frame jobs. The store worker
+encodes trusted output to a PNG in the requested standard bucket, including
+thumbnail URI and modification metadata. The private cache and the shared
+thumbnail directories have separate ownership and deletion paths.

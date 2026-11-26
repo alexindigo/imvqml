@@ -22,7 +22,8 @@
 - The store measurement uses the MIT-licensed QOI reference header from
   phoboslab/qoi commit `ffb2d2cb74a1de60819b21b939f7209aa53e91c1`, in
   `tests/vendor/qoi.h` with one blank line's trailing tabs removed. It is
-  not part of the library.
+  also used by the private store; the reader checks chunk bounds, exact
+  pixel count, geometry, payload checksum and marker before decoding.
 - The display path uses Qt Quick's public scene-graph APIs. `QQuickWindow`
   creates the texture at scene-graph sync and signals invalidation on the
   render thread; no Qt private API or platform GL context is used. Verified
@@ -30,3 +31,5 @@
 - Animation uses the allowed libvips loaders' `delay` and `loop` metadata
   and `page` selection for one composited frame. A source with pages but no
   complete delay table remains a still. GIF and WebP were verified.
+- Thumbnail export uses the freedesktop.org Thumbnail Managing Standard's
+  URI-derived PNG filename, size buckets and required URI/mtime text fields.

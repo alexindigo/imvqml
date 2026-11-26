@@ -2,6 +2,7 @@
 #pragma once
 
 #include "decode-client.h"
+#include "image-store.h"
 #include <QHash>
 #include <QList>
 #include <QPointer>
@@ -17,6 +18,7 @@ struct ImageAsset {
     DecodeSpec spec;
     int delay = 0;
     bool transient = false;
+    ImageStore::Lease storeLease;
 };
 using Asset = std::shared_ptr<const ImageAsset>;
 
@@ -39,9 +41,10 @@ private:
         int ticket = 0;
         QList<std::weak_ptr<const Done>> listeners;
         bool classified = false;
+        ImageStore::Lookup cached;
     };
     Interest interest(Done done, const std::shared_ptr<Pending> &pending = {});
-    void finish(const std::shared_ptr<Pending> &pending, Decoded decoded);
+    void finish(const std::shared_ptr<Pending> &pending, Decoded decoded, bool hit = false);
     void pumpLater();
     void pump();
     Asset exchangeAsset(ImageAsset asset);

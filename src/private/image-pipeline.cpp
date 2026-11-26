@@ -30,7 +30,8 @@ ImagePipeline::Interest ImagePipeline::interest(Done done,
 }
 
 ImagePipeline::Interest ImagePipeline::request(OpenedSource source, DecodeSpec spec, Done done) {
-    const auto key = source.identity + '\0' + encode(spec);
+    auto &store = imageStore();
+    const auto key = source.identity + '\0' + encode(spec) + QByteArray::number(store.epoch());
     if (!source.error && !spec.valid())
         source.error = {"admission", "invalid-size", "Physical size exceeds the output edge limit"};
     prune();
@@ -50,8 +51,26 @@ ImagePipeline::Interest ImagePipeline::request(OpenedSource source, DecodeSpec s
     auto &entry = m_pending[key];
     if (!entry) {
         entry = std::make_shared<Pending>(Pending{key, std::move(source.fd), spec, 0, {}});
-        m_waiting.append(entry);
-        pumpLater();
+        if (store.enabled()) {
+            store.lookup(
+                duplicateSource(entry->input), spec,
+                [self = QPointer(this), pending = std::weak_ptr(entry)](ImageStore::Lookup result) {
+                    auto request = pending.lock();
+                    if (!self || !request || self->m_pending.value(request->key) != request)
+                        return;
+                    auto value = std::exchange(result.value, {});
+                    request->cached = std::move(result);
+                    if (value) {
+                        self->finish(request, std::move(*value), true);
+                    } else {
+                        self->m_waiting.append(request);
+                        self->pumpLater();
+                    }
+                });
+        } else {
+            m_waiting.append(entry);
+            pumpLater();
+        }
     }
     auto lease = interest(std::move(done), entry);
     entry->listeners.append(lease);
@@ -100,17 +119,19 @@ void ImagePipeline::pump() {
     m_waiting.removeIf([](const auto &weak) { return weak.expired(); });
 }
 
-void ImagePipeline::finish(const std::shared_ptr<Pending> &request, Decoded decoded) {
+void ImagePipeline::finish(const std::shared_ptr<Pending> &request, Decoded decoded, bool hit) {
     if (m_pending.value(request->key) != request)
         return;
     m_pending.remove(request->key);
+    if (!hit && request->cached.lease)
+        imageStore().publish(request->cached, duplicateSource(request->input), decoded);
     Asset asset;
     if (!decoded.error) {
         auto stream =
             decoded.stream ? std::make_shared<const Fd>(std::move(request->input)) : nullptr;
         asset = exchangeAsset({request->key, std::move(decoded.source), std::move(decoded.pixels),
                                std::move(decoded.animation), std::move(stream), request->spec,
-                               decoded.delay});
+                               decoded.delay, false, request->cached.lease});
     }
     for (const auto &weak : std::as_const(request->listeners)) {
         if (const auto callback = weak.lock())

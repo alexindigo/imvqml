@@ -1,0 +1,139 @@
+// SPDX-License-Identifier: LGPL-3.0-only
+#include "imvcache.h"
+#include "private/image-pipeline.h"
+
+#include <QDir>
+#include <QHash>
+#include <QPointer>
+#include <QStandardPaths>
+
+namespace Imv {
+namespace {
+struct Policy {
+    QString directory =
+        QStandardPaths::writableLocation(QStandardPaths::GenericCacheLocation) + "/imvqml";
+    qint64 budget = ImageStore::DefaultBudget;
+    bool enabled = false;
+    void apply() { imageStore().configure(directory, budget, enabled); }
+};
+
+class PolicyOwner : public QObject {
+    Q_OBJECT
+public:
+    Policy value;
+signals:
+    void changed();
+};
+
+PolicyOwner &policy() {
+    static PolicyOwner shared;
+    return shared;
+}
+} // namespace
+
+struct ImvCache::State {
+    int lastId = 0;
+    QHash<int, ImagePipeline::Interest> exports;
+};
+
+ImvCache::ImvCache(QObject *parent) : QObject(parent), d(std::make_unique<State>()) {
+    connect(&policy(), &PolicyOwner::changed, this, &ImvCache::policyChanged);
+}
+
+ImvCache::~ImvCache() = default;
+
+QUrl ImvCache::directory() const { return QUrl::fromLocalFile(policy().value.directory); }
+void ImvCache::setDirectory(const QUrl &directory) {
+    auto path = localPath(directory);
+    if (!QDir::isAbsolutePath(path))
+        return;
+    path = QDir::cleanPath(path);
+    if (policy().value.directory == path)
+        return;
+    policy().value.directory = std::move(path);
+    policy().value.apply();
+    emit policy().changed();
+}
+
+qint64 ImvCache::byteBudget() const { return policy().value.budget; }
+void ImvCache::setByteBudget(qint64 bytes) {
+    if (bytes < 0 || policy().value.budget == bytes)
+        return;
+    policy().value.budget = bytes;
+    policy().value.apply();
+    emit policy().changed();
+}
+
+bool ImvCache::enabled() const { return policy().value.enabled; }
+void ImvCache::setEnabled(bool enabled) {
+    if (policy().value.enabled == enabled)
+        return;
+    policy().value.enabled = enabled;
+    policy().value.apply();
+    emit policy().changed();
+}
+
+void ImvCache::clear() {
+    // Also handle a store that has never been enabled in this process.
+    policy().value.apply();
+    imageStore().clear();
+}
+
+void ImvCache::invalidate(const QUrl &url) {
+    if (auto source = openSource(url); source.fd) {
+        policy().value.apply();
+        imageStore().invalidate(std::move(source.fd));
+    }
+}
+
+int ImvCache::exportThumbnail(const QUrl &source, int size) {
+    if (d->lastId == INT_MAX)
+        return -3;
+    const int id = ++d->lastId;
+    auto path = localPath(source);
+    if (path.isEmpty() || thumbnailBucket(size).isEmpty()) {
+        QMetaObject::invokeMethod(
+            this,
+            [this, id] {
+                finish(id, asMap(Failure{
+                               "admission", "invalid-source",
+                               "Thumbnail requires a local file and a standard bucket size"}));
+            },
+            Qt::QueuedConnection);
+        return id;
+    }
+    path = QDir::cleanPath(QDir::current().absoluteFilePath(path));
+    auto input = openSource(QUrl::fromLocalFile(path));
+    auto fd = std::make_shared<Fd>(duplicateSource(input.fd));
+    d->exports.insert(
+        id, imagePipeline().request(
+                std::move(input), {DecodeSpec::Pixels, {size, size}},
+                [self = QPointer(this), id, path, fd, size](Asset asset, Failure error) {
+                    if (!self)
+                        return;
+                    if (error) {
+                        self->finish(id, asMap(error));
+                        return;
+                    }
+                    imageStore().thumbnail(path, std::move(*fd), asset->pixels, asset->info, size,
+                                           [self, id](Failure failure, QUrl output) {
+                                               if (!self)
+                                                   return;
+                                               auto result =
+                                                   failure ? asMap(failure)
+                                                           : asMap(Failure{"complete", {}, {}});
+                                               if (!failure)
+                                                   result.insert("destination", output);
+                                               self->finish(id, result);
+                                           });
+                }));
+    return id;
+}
+
+void ImvCache::finish(int id, const QVariantMap &result) {
+    d->exports.remove(id);
+    emit thumbnailFinished(id, result);
+}
+} // namespace Imv
+
+#include "imvcache.moc"

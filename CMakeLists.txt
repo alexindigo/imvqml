@@ -13,6 +13,9 @@ find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Qml Quick)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(VIPS REQUIRED IMPORTED_TARGET vips>=8.14)
 pkg_check_modules(WEBP REQUIRED IMPORTED_TARGET libwebp)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/vips-decode.cpp")
+file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/src/vips-decode.cpp" IMV_LOADER_VERSION)
+find_library(IMV_VIPS_PATH NAMES vips HINTS ${VIPS_LIBRARY_DIRS} REQUIRED)
 qt_standard_project_setup(REQUIRES 6.8)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -42,14 +45,17 @@ qt_add_qml_module(imvqml URI ImvQml VERSION 1.0
     SOURCES src/include/imvqml/imvimagejob.h src/imvimagejob.cpp src/private/helper.cpp
         src/private/pool.cpp src/private/pool.h src/private/decode-client.cpp src/private/export.cpp
         src/include/imvqml/imvimage.h src/imvimage.cpp src/private/image-pipeline.cpp
-        src/private/image-node.cpp src/private/image-provider.cpp src/private/playback.cpp)
+        src/private/image-node.cpp src/private/image-provider.cpp src/private/playback.cpp
+        src/include/imvqml/imvcache.h src/imvcache.cpp src/private/image-store.cpp src/private/store-codec.cpp)
 target_include_directories(imvqml PUBLIC
     "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/include>"
     "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
-    PRIVATE src/include/imvqml)
+    PRIVATE src/include/imvqml tests/vendor)
 target_link_libraries(imvqml PUBLIC Qt6::Core Qt6::QmlIntegration Qt6::Quick
     PRIVATE Qt6::Gui Qt6::Qml imv-wire PkgConfig::WEBP ${CMAKE_DL_LIBS})
-target_compile_definitions(imvqml PRIVATE IMV_DECODER_FROM_LIB="${decoder_from_lib}")
+target_compile_definitions(imvqml PRIVATE IMV_DECODER_FROM_LIB="${decoder_from_lib}"
+    IMV_STORE_VERSION="${PROJECT_VERSION}/${VIPS_VERSION}/${IMV_LOADER_VERSION}"
+    IMV_VIPS_PATH="${IMV_VIPS_PATH}")
 set_target_properties(imvqml PROPERTIES VERSION "${PROJECT_VERSION}" SOVERSION 0
     LIBRARY_OUTPUT_DIRECTORY "${stage}/${CMAKE_INSTALL_LIBDIR}")
 set_target_properties(imvqmlplugin PROPERTIES INSTALL_RPATH "$ORIGIN/../../..")

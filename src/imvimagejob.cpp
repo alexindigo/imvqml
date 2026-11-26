@@ -57,7 +57,10 @@ struct ImvImageJob::State {
                               DecodeSpec::Contain, 0, position};
         QString path;
         Failure argumentError;
-        if (!spec.valid()) {
+        if (!DecodeSpec::validPosition(position)) {
+            argumentError = {"admission", "invalid-position",
+                             "Video position must be finite and between 0 and 1"};
+        } else if (!spec.valid()) {
             argumentError = {"admission", "invalid-size",
                              "Output bounds must be from 1 to 8192 pixels"};
         } else if (method == Render) {
@@ -75,7 +78,9 @@ struct ImvImageJob::State {
         if (!argumentError && !fromProvider) {
             if (!pool)
                 pool = &decoderPool();
-            if (!pool->available())
+            if (pool->capacity() == Pool::Admission::Exhausted)
+                return -3;
+            if (pool->capacity() == Pool::Admission::Busy)
                 return -2;
         }
         auto job = std::shared_ptr<Active>(
@@ -126,6 +131,8 @@ struct ImvImageJob::State {
             });
         if (ticket.status == Pool::Admission::Busy)
             return -2;
+        if (ticket.status == Pool::Admission::Exhausted)
+            return -3;
         if (ticket.status != Pool::Admission::Accepted) {
             failLater({"admission", "output-failed", "Cannot allocate decode output or ticket"});
             return job->id;

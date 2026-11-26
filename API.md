@@ -105,7 +105,7 @@ Negative admissions do not emit `finished`.
 The process pool is private. Its capacity pressure is retryable admission
 (`Busy`), not a terminal error. Process outcomes carry `stage: "helper"`
 and one of `deadline`, `helper-crashed`, `protocol-error`, or `cancelled`.
-Other codes: `admission` (`invalid-size`, `invalid-source`,
+Other codes: `admission` (`invalid-size`, `invalid-position`, `invalid-source`,
 `invalid-destination`, `too-large`, `output-failed`), `open` (`unreadable`),
 `inspect` (`unsupported-format`, `invalid-image`, `too-large`), `decode`
 (`invalid-image`, `output-failed`) and `store` (`already-exists`,

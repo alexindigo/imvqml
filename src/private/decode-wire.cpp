@@ -20,7 +20,11 @@ bool DecodeSpec::valid() const {
         return bounds == QSize(0, 0) && scale == Contain && page == 0 && position == 0;
     return mode >= Pixels && mode <= FrameAt && rgbaBytes(bounds) > 0 && scale >= Contain &&
            scale <= Stretch && page >= 0 && (mode == FrameAt || page == 0) &&
-           std::isfinite(position) && position >= 0 && position <= 1;
+           validPosition(position);
+}
+
+bool DecodeSpec::validPosition(double position) {
+    return std::isfinite(position) && position >= 0 && position <= 1;
 }
 
 bool SourceInfo::valid() const {

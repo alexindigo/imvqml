@@ -5,6 +5,7 @@
 #include <QImage>
 #include <QTemporaryDir>
 #include <QtTest>
+#include <limits>
 
 namespace {
 using Imv::ImvImageJob;
@@ -117,6 +118,18 @@ private slots:
         QCOMPARE(failure.value("code").toString(), code);
         QVERIFY(!failure.value("detail").toString().isEmpty());
         QVERIFY(!pixels(result(spy, job.sample(fixture("palette.png"), 20, 20))).isNull());
+    }
+
+    void invalidPosition() {
+        ImvImageJob job;
+        QSignalSpy spy(&job, &ImvImageJob::finished);
+        for (const auto position : {-0.01, 1.01, std::numeric_limits<double>::quiet_NaN()}) {
+            const auto failure = result(spy, job.sample(fixture("palette.png"), 20, 20, position));
+            QCOMPARE(failure.value("stage").toString(), "admission");
+            QCOMPARE(failure.value("code").toString(), "invalid-position");
+        }
+        const auto failure = result(spy, job.sample(fixture("palette.png"), 0, 20));
+        QCOMPARE(failure.value("code").toString(), "invalid-size");
     }
 
     void publication() {

@@ -22,6 +22,7 @@ struct DecodeSpec {
     int page = 0;
     double position = 0;
     bool valid() const;
+    static bool validPosition(double position);
 };
 
 struct SourceInfo {

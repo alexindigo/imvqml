@@ -62,7 +62,8 @@ public:
     Ticket submit(Frame request, std::chrono::milliseconds budget, Completion completion,
                   Validator validator = {});
     bool cancel(int id);
-    bool available() const;
+    Admission capacity() const;
+    bool available() const { return capacity() == Admission::Accepted; }
 
 signals:
     void capacityReleased(int id);

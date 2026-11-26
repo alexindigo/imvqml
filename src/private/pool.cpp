@@ -297,11 +297,9 @@ Pool::Ticket Pool::submit(Frame request, std::chrono::milliseconds budget, Compl
         request.fds.size() > MaxFds || budget.count() <= 0 ||
         budget.count() > std::numeric_limits<int>::max() || !completion)
         return {Admission::Invalid};
-    if (d->lastId == std::numeric_limits<int>::max())
-        return {Admission::Exhausted};
+    if (const auto status = capacity(); status != Admission::Accepted)
+        return {status};
     auto *slot = d->idle();
-    if (!slot)
-        return {Admission::Busy};
     const int id = ++d->lastId;
     request.serial = ++d->lastSerial;
     const auto serial = request.serial;
@@ -324,7 +322,11 @@ bool Pool::cancel(int id) {
     return false;
 }
 
-bool Pool::available() const { return d->lastId < std::numeric_limits<int>::max() && d->idle(); }
+Pool::Admission Pool::capacity() const {
+    if (d->lastId == std::numeric_limits<int>::max())
+        return Admission::Exhausted;
+    return d->idle() ? Admission::Accepted : Admission::Busy;
+}
 
 std::unique_ptr<Child> processChild(const QString &executable) {
     return std::make_unique<ProcessChild>(executable);

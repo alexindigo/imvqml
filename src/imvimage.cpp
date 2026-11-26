@@ -41,7 +41,11 @@ struct ImvImage::State {
     qreal dpr = 0;
     quint64 generation = 0;
     quint64 assetGeneration = 0;
-    quint64 reported = 0; // Last generation queued by scene graph sync.
+    quint64 sourceEpoch = 0;
+    quint64 presentationRevision = 0;
+    quint64 renderAttempt = 0;
+    quint64 reportedRevision = 0;
+    std::optional<bool> lastUpload;
     Asset asset;
     std::unique_ptr<Playback> playback;
     QMetaObject::Connection windowVisibility;
@@ -61,8 +65,9 @@ struct ImvImage::State {
 
 ImvImage::ImvImage(QQuickItem *parent) : QQuickItem(parent), d(std::make_unique<State>()) {
     setFlag(ItemHasContents);
-    connect(this, &QQuickItem::smoothChanged, this, [this] { update(); });
+    connect(this, &QQuickItem::smoothChanged, this, &ImvImage::refreshPresentation);
     connect(this, &QQuickItem::windowChanged, this, [this](QQuickWindow *window) {
+        refreshPresentation();
         QObject::disconnect(d->windowVisibility);
         if (window)
             d->windowVisibility =
@@ -151,7 +156,7 @@ void ImvImage::setMask(Mask mask) {
     if (mask < NoMask || mask > Rounded || d->mask == mask)
         return;
     d->mask = mask;
-    update();
+    refreshPresentation();
     emit maskChanged();
 }
 
@@ -161,7 +166,7 @@ void ImvImage::setRadius(qreal radius) {
     if (d->radius == radius)
         return;
     d->radius = radius;
-    update();
+    refreshPresentation();
     emit radiusChanged();
 }
 
@@ -170,7 +175,7 @@ void ImvImage::setTint(const QColor &color) {
     if (d->tint == color)
         return;
     d->tint = color;
-    update();
+    refreshPresentation();
     emit tintChanged();
 }
 
@@ -236,18 +241,25 @@ void ImvImage::setOutcome(Status status, QString stage, QString code, QString de
 void ImvImage::resetRequest(bool discard) {
     d->revoke();
     d->requested = {};
-    if (discard)
+    if (discard) {
+        ++d->sourceEpoch;
         d->asset.reset();
+    }
     const bool hadInfo = discard && !d->info.isEmpty();
     if (hadInfo)
         d->info.clear();
     polish();
-    update();
+    refreshPresentation();
     const QPointer guard(this);
     const auto generation = d->generation;
     setOutcome(!d->hasBytes && d->url.isEmpty() ? Idle : Loading);
     if (guard && generation == d->generation && hadInfo)
         emit sourceInfoChanged();
+}
+
+void ImvImage::refreshPresentation() {
+    ++d->presentationRevision;
+    update();
 }
 
 void ImvImage::itemChange(ItemChange change, const ItemChangeData &value) {
@@ -260,7 +272,7 @@ void ImvImage::geometryChange(const QRectF &now, const QRectF &before) {
     QQuickItem::geometryChange(now, before);
     if (now.size() != before.size()) {
         polish();
-        update();
+        refreshPresentation();
     }
 }
 
@@ -316,10 +328,10 @@ void ImvImage::updatePolish() {
                         return;
                     }
                     self->d->asset = std::move(frame);
-                    self->update();
+                    self->refreshPresentation();
                 });
         }
-        self->update();
+        self->refreshPresentation();
         const auto info = state.asset ? asMap(state.asset->info) : QVariantMap{};
         const bool infoChange = info != state.info;
         state.info = info;
@@ -346,15 +358,20 @@ void ImvImage::updatePolish() {
 
 QSGNode *ImvImage::updatePaintNode(QSGNode *old, UpdatePaintNodeData *) {
     const auto asset = d->asset;
-    QSGNode *node = updateImageNode(old, window(), asset, size(), d->fill, d->mask, d->radius,
-                                    d->tint, smooth());
-    if (asset && !size().isEmpty() && d->reported != d->generation &&
-        d->assetGeneration == d->generation) {
-        d->reported = d->generation;
+    const bool recreated = !old;
+    const auto result = updateImageNode(old, window(), asset, size(), d->fill, d->mask, d->radius,
+                                        d->tint, smooth(), d->sourceEpoch);
+    const auto revision = d->presentationRevision;
+    if (asset && !size().isEmpty() && d->assetGeneration == d->generation &&
+        (recreated || d->reportedRevision != revision || d->lastUpload != result.uploaded)) {
+        d->reportedRevision = revision;
+        d->lastUpload = result.uploaded;
+        const auto attempt = ++d->renderAttempt;
         QMetaObject::invokeMethod(
             this,
-            [this, generation = d->generation, success = node != nullptr] {
-                if (d->generation != generation)
+            [this, generation = d->generation, revision, attempt, success = result.uploaded] {
+                if (d->generation != generation || d->presentationRevision != revision ||
+                    d->renderAttempt != attempt || (d->failure && d->failure.stage != "upload"))
                     return;
                 if (success)
                     setOutcome(Ready);
@@ -364,6 +381,6 @@ QSGNode *ImvImage::updatePaintNode(QSGNode *old, UpdatePaintNodeData *) {
             },
             Qt::QueuedConnection);
     }
-    return node;
+    return result.node;
 }
 } // namespace Imv

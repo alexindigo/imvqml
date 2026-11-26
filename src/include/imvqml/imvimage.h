@@ -85,6 +85,7 @@ private:
     struct State;
     std::unique_ptr<State> d;
     void resetRequest(bool discard);
+    void refreshPresentation();
     void syncPlayback();
     void setOutcome(Status status, QString stage = {}, QString code = {}, QString detail = {});
 };

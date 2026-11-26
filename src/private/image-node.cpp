@@ -15,6 +15,7 @@ namespace Imv {
 namespace {
 constexpr qint64 TextureBudget = 128ll * 1024 * 1024;
 std::atomic<quint64> uploads;
+std::atomic<QQuickWindow *> failNext;
 
 struct Layout {
     QRectF target, source;
@@ -120,20 +121,34 @@ public:
             m_lru.splice(m_lru.begin(), m_lru, *found);
             return m_lru.front();
         }
-        const auto image = presentation.image(asset->pixels);
+        auto image = presentation.image(asset->pixels);
+        if (asset->animation.count && image.constBits() == asset->pixels.constBits())
+            image = image.copy(); // A software texture must not keep the batch mapping either.
         if (image.isNull())
+            return {};
+        auto failing = window;
+        if (failNext.compare_exchange_strong(failing, nullptr))
             return {};
         auto texture = std::unique_ptr<QSGTexture>(window->createTextureFromImage(image));
         if (!texture)
             return {};
         uploads.fetch_add(1, std::memory_order_relaxed);
-        auto entry =
-            std::make_shared<Entry>(Entry{asset, std::move(key), image.size(), std::move(texture)});
+        // An animation frame can pin a whole batch or a large encoded stream.
+        // The playback/item owns that backing; an idle texture has no use for it.
+        const Asset reusable =
+            asset->animation.count || asset->stream || asset->transient ? nullptr : asset;
+        auto entry = std::make_shared<Entry>(
+            Entry{reusable, std::move(key), image.size(), std::move(texture)});
         if (asset->transient)
             return entry;
         m_lru.push_front(entry);
         m_index.insert(entry->key, m_lru.begin());
         m_bytes += entry->bytes();
+        if (entry->asset) {
+            auto &uses = m_cpuBackings[entry->asset->pixels.constBits()];
+            if (!uses++)
+                m_bytes += entry->asset->pixels.sizeInBytes();
+        }
         trim();
         return entry;
     }
@@ -145,6 +160,14 @@ public:
             if (cursor->use_count() != 1)
                 continue;
             m_bytes -= (*cursor)->bytes();
+            if (const auto &asset = (*cursor)->asset) {
+                const auto bits = asset->pixels.constBits();
+                auto backing = m_cpuBackings.find(bits);
+                if (!--backing.value()) {
+                    m_bytes -= asset->pixels.sizeInBytes();
+                    m_cpuBackings.erase(backing);
+                }
+            }
             m_index.remove((*cursor)->key);
             cursor = m_lru.erase(cursor);
         }
@@ -153,6 +176,7 @@ public:
 private:
     std::list<std::shared_ptr<Entry>> m_lru;
     QHash<QByteArray, decltype(m_lru)::iterator> m_index;
+    QHash<const uchar *, int> m_cpuBackings;
     qint64 m_bytes = 0;
 };
 
@@ -189,6 +213,8 @@ public:
             cache->trim();
     }
 
+    quint64 sourceEpoch = 0;
+
     bool sync(QQuickWindow *window, const Asset &asset, const Presentation &presentation) {
         auto key = presentation.key(asset);
         if (m_lease && m_lease->key == key)
@@ -221,12 +247,14 @@ private:
 };
 } // namespace
 
-QSGNode *updateImageNode(QSGNode *old, QQuickWindow *window, const Asset &asset, QSizeF size,
-                         ImvImage::FillMode fill, ImvImage::Mask mask, qreal radius,
-                         const QColor &tint, bool smooth) {
+TextureOutcome updateImageNode(QSGNode *old, QQuickWindow *window, const Asset &asset, QSizeF size,
+                               ImvImage::FillMode fill, ImvImage::Mask mask, qreal radius,
+                               const QColor &tint, bool smooth, quint64 sourceEpoch) {
     auto node = std::unique_ptr<ImageNode>(static_cast<ImageNode *>(old));
     if (!asset || size.isEmpty())
-        return nullptr;
+        return {nullptr, false};
+    if (node && node->sourceEpoch != sourceEpoch)
+        node.reset();
     const auto limit = qMin(size.width(), size.height()) / 2;
     radius = mask == ImvImage::Circle ? limit : qMin(radius, limit);
     if (mask == ImvImage::NoMask || radius <= 0) {
@@ -240,13 +268,17 @@ QSGNode *updateImageNode(QSGNode *old, QQuickWindow *window, const Asset &asset,
     const QRgb tintRgb = tint.isValid() && tint.alphaF() > 0 ? tint.rgb() : 0;
     const Presentation presentation{
         size, QSize(edge(size.width()), edge(size.height())), fill, mask, radius, tintRgb, smooth};
-    if (!node)
+    const bool hadTexture = bool(node);
+    if (!node) {
         node = std::make_unique<ImageNode>(forGraph(window));
+        node->sourceEpoch = sourceEpoch;
+    }
     if (!node->sync(window, asset, presentation))
-        return nullptr;
+        return {hadTexture ? node.release() : nullptr, false};
     node->layout(presentation);
-    return node.release();
+    return {node.release(), true};
 }
 
 quint64 textureUploads() { return uploads.load(std::memory_order_relaxed); }
+void failNextTextureUpload(QQuickWindow *window) { failNext.store(window); }
 } // namespace Imv

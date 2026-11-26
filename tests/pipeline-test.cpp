@@ -220,6 +220,7 @@ private slots:
             QTRY_VERIFY(shown.size() > paused + i || failure);
             QVERIFY2(!failure, qPrintable(failure.detail));
             QVERIFY(playback.buffered() <= Playback::Ahead);
+            QVERIFY(playback.bufferedBytes() <= AnimationBudget);
             const QColor colors[]{Qt::green, Qt::yellow, Qt::red};
             QCOMPARE(shown[paused + i], colors[(paused + i) % 3]);
         }

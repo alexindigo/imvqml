@@ -65,7 +65,9 @@ GUI-affine pipeline keys requests by source revision (file stat including
 ctime, or digest of immutable owned bytes) and the encoded decode spec. It
 coalesces waiting and submitted decodes, queues behind pool capacity, and
 revokes delivery interest independently of helper retirement. A generation
-guards decode and texture outcomes at the item. The pipeline's result index
+guards decode delivery and each presentation revision tracks its texture
+outcome separately. A failed update can keep the last valid texture for the
+same source; a successful replacement recovers the item. The pipeline's result index
 is weak: it owns neither idle mappings nor scene-graph resources.
 
 Qt image providers are a separate source boundary: items and image jobs take
@@ -74,7 +76,8 @@ admission, or when an async response arrives. Fitting and rendering read only
 that snapshot, so geometry changes cannot re-request transient provider pixels.
 
 Each window's scene graph owns a render-thread texture LRU. Scene-graph nodes
-hold texture leases; texture entries hold the decoded asset for reuse. One
+hold texture leases. Still-image entries keep and account for reusable decoded
+backing once, while textures never keep an entire idle animation batch. One
 texture is shared across matching presentations. Masks are antialiased alpha
 variants generated at the texture boundary, so they work with software and
 GPU renderers without requiring separate decodes or disk entries. The texture
@@ -99,7 +102,9 @@ and the caller retains the opened input descriptor for playback.
 
 Each active stream has a separate one-slot playback pool. One request reads
 one composited source page using libvips' page selection. A two-frame lookahead
-ring is consumer-driven and streamed textures are not retained in the LRU.
+ring is consumer-driven. Buffered and in-flight output bytes share a 64 MiB
+lookahead budget or, for larger frames, one request-sized reservation. Streamed
+frame textures are not retained in the LRU.
 The decoder reparses the encoded source as needed; decoded pixels do not
 grow with the frame count. Timers own delay, loop and pause state; the item
 passes visibility and play intent. Paused streams retire their helper and

@@ -14,6 +14,7 @@ public:
     void run(bool enabled);
     void rewind();
     int buffered() const { return m_ring.size(); }
+    qint64 bufferedBytes() const;
     bool hasHelper() const { return bool(m_helper); }
 
 private:
@@ -38,7 +39,7 @@ private:
     int m_remaining = 0;
     bool m_running = false;
     bool m_waiting = false;
-    bool m_inFlight = false;
+    qint64 m_inFlight = 0;
     bool m_complete = false;
 };
 

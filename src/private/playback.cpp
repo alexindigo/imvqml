@@ -36,7 +36,7 @@ void Playback::run(bool enabled) {
 void Playback::retire() {
     m_helper.reset();
     m_ring.clear();
-    m_inFlight = false;
+    m_inFlight = 0;
 }
 
 void Playback::rewind() {
@@ -96,9 +96,9 @@ void Playback::tick() {
     } else {
         m_remaining = m_base->animation.delay(index);
         frame = index == 0 ? m_base
-                           : std::make_shared<const ImageAsset>(
-                                 ImageAsset{m_base->key + "/frame/" + QByteArray::number(index),
-                                            m_base->info, m_base->animation.frame(index)});
+                           : std::make_shared<const ImageAsset>(ImageAsset{
+                                 m_base->key + "/frame/" + QByteArray::number(index), m_base->info,
+                                 m_base->animation.frame(index), m_base->animation});
     }
     m_index = index;
     m_cycle = cycle;
@@ -111,8 +111,18 @@ void Playback::tick() {
         fill();
 }
 
+qint64 Playback::bufferedBytes() const {
+    auto bytes = m_inFlight;
+    for (const auto &frame : m_ring)
+        bytes += frame.pixels.sizeInBytes();
+    return bytes;
+}
+
 void Playback::fill() {
     if (!m_running || !m_base->stream || m_inFlight || m_ring.size() >= Ahead)
+        return;
+    const qint64 reservation = rgbaBytes(m_base->spec.bounds);
+    if (!reservation || bufferedBytes() > qMax(AnimationBudget, reservation) - reservation)
         return;
     int index = m_ring.isEmpty() ? m_index : m_ring.back().index;
     qint64 cycle = m_ring.isEmpty() ? m_cycle : m_ring.back().cycle;
@@ -122,7 +132,7 @@ void Playback::fill() {
         m_helper = std::make_unique<Pool>([] { return processChild(decoderPath()); }, 1, 32);
         connect(m_helper.get(), &Pool::capacityReleased, this, &Playback::fill);
     }
-    if (!m_helper->available())
+    if (m_helper->capacity() == Pool::Admission::Busy)
         return;
     auto spec = m_base->spec;
     spec.mode = DecodeSpec::FrameAt;
@@ -130,7 +140,7 @@ void Playback::fill() {
     spec.position = 0;
     const auto ticket = submitDecode(
         *m_helper, duplicateSource(*m_base->stream), spec, [this, index, cycle](Decoded value) {
-            m_inFlight = false;
+            m_inFlight = 0;
             if (!value.error && (value.source.size != m_base->info.size ||
                                  value.source.frames != m_base->info.frames ||
                                  value.source.loop != m_base->info.loop ||
@@ -150,7 +160,7 @@ void Playback::fill() {
                 fill();
         });
     if (ticket.status == Pool::Admission::Accepted) {
-        m_inFlight = true;
+        m_inFlight = reservation;
     } else if (ticket.status != Pool::Admission::Busy) {
         run(false);
         m_complete = true;

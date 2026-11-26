@@ -24,6 +24,8 @@ private slots:
     void alphaTint();
     void tintGeometry();
     void firstFramePreview();
+    void textureOutcome();
+    void idleBatchBacking();
     void animation();
     void cachePolicy();
 };
@@ -524,6 +526,70 @@ void ItemTest::firstFramePreview() {
     QCOMPARE(color(), QColor(Qt::red));
     item.setPlaying(true);
     QTRY_COMPARE(color(), QColor(Qt::green));
+}
+
+void ItemTest::textureOutcome() {
+    QQuickWindow window;
+    window.resize(100, 80);
+    window.setColor(Qt::blue);
+    Imv::ImvImage item(window.contentItem());
+    item.setSize({64, 32});
+    const auto color = [&] {
+        const auto frame = window.grabWindow();
+        return frame.isNull() ? QColor()
+                              : frame.pixelColor(8 * frame.width() / window.width(),
+                                                 16 * frame.height() / window.height());
+    };
+    Imv::failNextTextureUpload(&window);
+    item.setSource(QUrl::fromLocalFile(IMV_FIXTURES "/palette.png"));
+    window.show();
+    QTRY_COMPARE(item.errorCode(), "texture-failed");
+    QCOMPARE(item.status(), Imv::ImvImage::Failed);
+    item.setTint(Qt::red);
+    QTRY_COMPARE(item.status(), Imv::ImvImage::Ready);
+    QTRY_COMPARE(color(), QColor(Qt::red));
+    const auto submissions = Imv::imagePipeline().submissions();
+    Imv::failNextTextureUpload(&window);
+    item.setTint(Qt::green);
+    QTRY_COMPARE(item.errorCode(), "texture-failed");
+    QCOMPARE(color(), QColor(Qt::red));
+    item.setTint(Qt::yellow);
+    QTRY_COMPARE(item.status(), Imv::ImvImage::Ready);
+    QTRY_COMPARE(color(), QColor(Qt::yellow));
+    QCOMPARE(Imv::imagePipeline().submissions(), submissions);
+}
+
+void ItemTest::idleBatchBacking() {
+    QQuickWindow window;
+    window.resize(200, 80);
+    window.show();
+    QTRY_VERIFY(window.isExposed());
+    const auto dpr = window.effectiveDevicePixelRatio();
+    std::vector<std::unique_ptr<Imv::ImvImage>> items;
+    std::vector<std::weak_ptr<const uchar>> mappings;
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    for (int i = 0; i < 3; ++i) {
+        const auto path = dir.filePath(QString::number(i) + ".gif");
+        QVERIFY(QFile::copy(IMV_FIXTURES "/animation.gif", path));
+        const auto url = QUrl::fromLocalFile(path);
+        auto item = std::make_unique<Imv::ImvImage>(window.contentItem());
+        item->setX(i * 64);
+        item->setSize({64, 32});
+        item->setPlaying(false);
+        item->setSource(url);
+        QTRY_COMPARE(item->status(), Imv::ImvImage::Ready);
+        Imv::Asset asset;
+        auto interest = Imv::imagePipeline().request(
+            Imv::openSource(url), {Imv::DecodeSpec::Animation, {qCeil(64 * dpr), qCeil(32 * dpr)}},
+            [&](Imv::Asset value, Imv::Failure) { asset = std::move(value); });
+        QTRY_VERIFY(asset && asset->animation.mapping);
+        mappings.emplace_back(asset->animation.mapping);
+        items.push_back(std::move(item));
+    }
+    items.clear();
+    for (const auto &mapping : mappings)
+        QTRY_VERIFY_WITH_TIMEOUT(mapping.expired(), 1000);
 }
 
 void ItemTest::animation() {

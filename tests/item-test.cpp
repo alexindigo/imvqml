@@ -219,18 +219,27 @@ void ItemTest::transientAsyncProviderJob() {
     const auto url = QUrl("image://transient/once");
     const int id = job->sample(url, 8, 8);
     QVERIFY(id > 0 && provider->response);
+    const int still = job->sample(QUrl::fromLocalFile(IMV_FIXTURES "/palette.png"), 8, 8);
+    QVERIFY(still > 0);
+    QCOMPARE(job->sample(url, 8, 8), -2);
     provider->deliver();
     QVERIFY(done.isEmpty());
-    QTRY_COMPARE(done.size(), 1);
-    QCOMPARE(done[0][0].toInt(), id);
-    QCOMPARE(done[0][1].toMap().value("rgba").toByteArray(), QByteArray(8 * 8 * 4, char(255)));
+    QTRY_COMPARE(done.size(), 2);
+    for (const auto &reply : done) {
+        const int ticket = reply[0].toInt();
+        QVERIFY(ticket == id || ticket == still);
+        QVERIFY(reply[1].toMap().value("code").toString().isEmpty());
+        if (ticket == id)
+            QCOMPARE(reply[1].toMap().value("rgba").toByteArray(),
+                     QByteArray(8 * 8 * 4, char(255)));
+    }
     QTRY_VERIFY(!provider->response);
     const int cancelled = job->sample(url, 8, 8);
     QVERIFY(cancelled > 0 && provider->response);
     QVERIFY(job->cancel(cancelled));
-    QTRY_COMPARE(done.size(), 2);
-    QCOMPARE(done[1][0].toInt(), cancelled);
-    QCOMPARE(done[1][1].toMap().value("code").toString(), QString("cancelled"));
+    QTRY_COMPARE(done.size(), 3);
+    QCOMPARE(done[2][0].toInt(), cancelled);
+    QCOMPARE(done[2][1].toMap().value("code").toString(), QString("cancelled"));
     QTRY_VERIFY(!provider->response);
 }
 

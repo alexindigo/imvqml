@@ -286,8 +286,10 @@ struct Pool::State {
 Pool::Pool(QObject *parent)
     : Pool([] { return processChild(decoderPath()); }, DefaultChildren, DefaultReuse, parent) {}
 
-Pool::Pool(Factory factory, int capacity, unsigned maxReuse, QObject *parent)
-    : QObject(parent), d(std::make_unique<State>(*this, std::move(factory), capacity, maxReuse)) {}
+Pool::Pool(Factory factory, int capacity, unsigned maxReuse, QObject *parent, int previousTicket)
+    : QObject(parent), d(std::make_unique<State>(*this, std::move(factory), capacity, maxReuse)) {
+    d->lastId = qMax(0, previousTicket);
+}
 
 Pool::~Pool() = default;
 

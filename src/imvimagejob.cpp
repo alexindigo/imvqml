@@ -13,6 +13,19 @@
 #include <mutex>
 
 namespace Imv {
+namespace {
+// A job holds its share through delivery, including provider and export work.
+constexpr int MaxJobs = 2;
+std::atomic<int> activeJobs;
+std::shared_ptr<void> reserveJob() {
+    int used = activeJobs.load();
+    do {
+        if (used >= MaxJobs)
+            return {};
+    } while (!activeJobs.compare_exchange_weak(used, used + 1));
+    return {&activeJobs, [](void *) { --activeJobs; }};
+}
+} // namespace
 
 struct ImvImageJob::State {
     enum Method { Inspect, Sample, Render };
@@ -28,6 +41,10 @@ struct ImvImageJob::State {
         std::atomic<Publication> phase{Publication::Staging};
         std::function<void()> cancelProvider;
         bool awaitingProvider = false;
+        std::shared_ptr<void> permit;
+        std::shared_ptr<void> preparing;
+        OpenedSource source;
+        QMetaObject::Connection waitCapacity;
     };
 
     explicit State(ImvImageJob &owner) : q(owner), dispatch(std::make_shared<Dispatch>()) {
@@ -40,6 +57,8 @@ struct ImvImageJob::State {
             dispatch->target = nullptr;
         }
         for (const auto &job : std::as_const(jobs)) {
+            job->preparing.reset();
+            QObject::disconnect(job->waitCapacity);
             auto expected = Publication::Staging;
             job->phase.compare_exchange_strong(expected, Publication::Cancelled);
             if (job->poolId > 0 && pool)
@@ -83,8 +102,12 @@ struct ImvImageJob::State {
             if (pool->capacity() == Pool::Admission::Busy)
                 return -2;
         }
+        auto permit = reserveJob();
+        if (!permit)
+            return -2;
         auto job = std::shared_ptr<Active>(
             new Active{++lastId, 0, method, std::move(path), std::move(format)});
+        job->permit = std::move(permit);
         const auto failLater = [this, &job](Failure error) {
             jobs.insert(job->id, job);
             QMetaObject::invokeMethod(
@@ -119,27 +142,49 @@ struct ImvImageJob::State {
                 cancel();
             return job->id;
         }
-        auto source = openSource(url);
-        if (source.error) {
-            failLater(std::move(source.error));
-            return job->id;
-        }
-        const auto ticket =
-            submitDecode(*pool, std::move(source.fd), spec, [receiver, job](Decoded image) mutable {
-                if (receiver)
-                    receiver->d->decoded(job, std::move(image));
+        job->preparing =
+            prepareSource(url, [receiver, weak = std::weak_ptr(job), spec](OpenedSource source) {
+                auto active = weak.lock();
+                if (!receiver || !active)
+                    return;
+                active->preparing.reset();
+                if (source.error) {
+                    receiver->d->finish(active, asMap(source.error));
+                    return;
+                }
+                active->source = std::move(source);
+                receiver->d->dispatchDecode(active, spec);
             });
-        if (ticket.status == Pool::Admission::Busy)
+        if (!job->preparing)
             return -2;
-        if (ticket.status == Pool::Admission::Exhausted)
-            return -3;
-        if (ticket.status != Pool::Admission::Accepted) {
-            failLater({"admission", "output-failed", "Cannot allocate decode output or ticket"});
-            return job->id;
-        }
-        job->poolId = ticket.id;
         jobs.insert(job->id, job);
         return job->id;
+    }
+
+    void dispatchDecode(const std::shared_ptr<Active> &job, DecodeSpec spec) {
+        const QPointer receiver(&q);
+        if (pool && pool->capacity() == Pool::Admission::Busy) {
+            if (!job->waitCapacity)
+                job->waitCapacity = QObject::connect(
+                    pool, &Pool::capacityReleased, &q, [receiver, weak = std::weak_ptr(job), spec] {
+                        if (auto active = weak.lock(); receiver && active)
+                            receiver->d->dispatchDecode(active, spec);
+                    });
+            return;
+        }
+        QObject::disconnect(std::exchange(job->waitCapacity, {}));
+        const auto ticket = pool ? submitDecode(*pool, std::move(job->source.fd), spec,
+                                                [receiver, job](Decoded image) mutable {
+                                                    if (receiver)
+                                                        receiver->d->decoded(job, std::move(image));
+                                                })
+                                 : Pool::Ticket{Pool::Admission::Invalid};
+        if (ticket.status != Pool::Admission::Accepted) {
+            finish(job, asMap(Failure{"admission", "output-failed",
+                                      "Cannot allocate decode output or ticket"}));
+            return;
+        }
+        job->poolId = ticket.id;
     }
 
     void finish(const std::shared_ptr<Active> &job, QVariantMap result) {
@@ -147,6 +192,7 @@ struct ImvImageJob::State {
             return;
         if (job->phase.load() == Publication::Cancelled)
             result = asMap(Failure{"helper", "cancelled", "Image job cancelled"});
+        job->permit.reset();
         emit q.finished(job->id, result);
     }
 
@@ -179,6 +225,7 @@ struct ImvImageJob::State {
                                               image = std::move(image.pixels),
                                               result = std::move(result)]() mutable {
             auto error = stageImage(job->destination, job->format, image, job->phase);
+            image = {};
             if (error)
                 result = asMap(error);
             const std::lock_guard lock(dispatch->lock);
@@ -220,7 +267,12 @@ bool ImvImageJob::cancel(int id) {
         return false;
     if (job->poolId > 0 && d->pool)
         d->pool->cancel(job->poolId);
-    else if (job->awaitingProvider) {
+    else if (job->preparing || job->waitCapacity) {
+        job->preparing.reset();
+        QObject::disconnect(std::exchange(job->waitCapacity, {}));
+        job->source = {};
+        QMetaObject::invokeMethod(this, [this, job] { d->finish(job, {}); }, Qt::QueuedConnection);
+    } else if (job->awaitingProvider) {
         const QPointer guard(this);
         if (auto cancel = std::exchange(job->cancelProvider, {}))
             cancel();

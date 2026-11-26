@@ -80,10 +80,8 @@ void ImvCache::clear() {
 }
 
 void ImvCache::invalidate(const QUrl &url) {
-    if (auto source = openSource(url); source.fd) {
-        policy().value.apply();
-        imageStore().invalidate(std::move(source.fd));
-    }
+    policy().value.apply();
+    imageStore().invalidate(url);
 }
 
 int ImvCache::exportThumbnail(const QUrl &source, int size) {
@@ -103,21 +101,19 @@ int ImvCache::exportThumbnail(const QUrl &source, int size) {
         return id;
     }
     path = QDir::cleanPath(QDir::current().absoluteFilePath(path));
-    auto input = openSource(QUrl::fromLocalFile(path));
-    const auto revision = input.file;
     d->exports.insert(
         id, imagePipeline().request(
-                std::move(input), {DecodeSpec::Pixels, {size, size}},
-                [self = QPointer(this), id, path, revision, size](Asset asset, Failure error) {
+                SourceInput(QUrl::fromLocalFile(path)), {DecodeSpec::Pixels, {size, size}},
+                [self = QPointer(this), id, path, size](Asset asset, Failure error) {
                     if (!self)
                         return;
-                    if (error || !revision) {
+                    if (error || !asset->file) {
                         self->finish(id, asMap(error ? error
                                                      : Failure{"open", "unreadable",
                                                                "Missing source revision"}));
                         return;
                     }
-                    imageStore().thumbnail(path, *revision, asset->pixels, asset->info, size,
+                    imageStore().thumbnail(path, *asset->file, asset->pixels, asset->info, size,
                                            [self, id](Failure failure, QUrl output) {
                                                if (!self)
                                                    return;

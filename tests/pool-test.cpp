@@ -62,6 +62,19 @@ class PoolTest : public QObject {
         return [] { return processChild(QStringLiteral(IMV_FAULT_CHILD)); };
     }
 private slots:
+    void negativeAdmissions() {
+        const auto factory = [] { return std::make_unique<FakeChild>(); };
+        Pool busy(factory, 0, 32);
+        Pool exhausted(factory, 1, 32, nullptr, std::numeric_limits<int>::max());
+        const auto submit = [](Pool &pool) {
+            return pool.submit({Kind::Request, 0, "test", {}}, 1s, [](JobReply) {});
+        };
+        QCOMPARE(busy.capacity(), Pool::Admission::Busy);
+        QCOMPARE(submit(busy).status, Pool::Admission::Busy);
+        QCOMPARE(exhausted.capacity(), Pool::Admission::Exhausted);
+        QCOMPARE(submit(exhausted).status, Pool::Admission::Exhausted);
+    }
+
     void killedAndRespawned() {
         Pool pool(native(), 1, 32);
         QSignalSpy releases(&pool, &Pool::capacityReleased);

@@ -29,7 +29,7 @@ add_test(NAME generate-video COMMAND "${Python3_EXECUTABLE}"
     "${CMAKE_CURRENT_SOURCE_DIR}/generate-video.py" "${fixtures}" "${IMV_FFMPEG}")
 set_tests_properties(generate-video PROPERTIES FIXTURES_REQUIRED images FIXTURES_SETUP videos TIMEOUT 30)
 add_executable(imv-video-test video-test.cpp)
-target_link_libraries(imv-video-test PRIVATE imvqml Qt6::Test)
+target_link_libraries(imv-video-test PRIVATE imvqml imv-wire Qt6::Test)
 target_compile_definitions(imv-video-test PRIVATE IMV_FIXTURES="${fixtures}")
 add_dependencies(imv-video-test imvqml-decoder)
 add_test(NAME videos COMMAND imv-video-test samples)
@@ -40,9 +40,12 @@ set_target_properties(imv-mpv-fault PROPERTIES OUTPUT_NAME mpv SOVERSION 2
 add_test(NAME video-native-fault COMMAND "${CMAKE_COMMAND}" -E env
     "LD_LIBRARY_PATH=$<TARGET_FILE_DIR:imv-mpv-fault>" IMV_VIDEO_TEST=fault
     "$<TARGET_FILE:imv-video-test>" containment)
+add_test(NAME video-native-watchdog COMMAND "${CMAKE_COMMAND}" -E env
+    "LD_LIBRARY_PATH=$<TARGET_FILE_DIR:imv-mpv-fault>" IMV_MPV_FAULT_HANG=1
+    "$<TARGET_FILE:imv-video-test>" watchdogWithoutGui)
 add_test(NAME video-without-mpv COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/without-mpv.py"
     "${BWRAP}" "${IMV_MPV_RUNTIME}" "$<TARGET_FILE:imv-video-test>")
-set_tests_properties(videos video-native-fault video-without-mpv PROPERTIES FIXTURES_REQUIRED videos TIMEOUT 35)
+set_tests_properties(videos video-native-fault video-native-watchdog video-without-mpv PROPERTIES FIXTURES_REQUIRED videos TIMEOUT 35)
 endif()
 add_executable(imv-job-test job-test.cpp)
 target_link_libraries(imv-job-test PRIVATE imvqml Qt6::Test Qt6::Gui)

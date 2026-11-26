@@ -339,7 +339,7 @@ void ImvImage::updatePolish() {
                 imagePipeline().providerAsset(std::move(decoded.pixels), decoded.source.size, spec),
                 {});
     } else {
-        auto source = d->hasBytes ? openSource(d->bytes) : openSource(d->url);
+        auto source = d->hasBytes ? SourceInput(d->bytes) : SourceInput(d->url);
         d->interest = imagePipeline().request(std::move(source), spec, done);
     }
 }

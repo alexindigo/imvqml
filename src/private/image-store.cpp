@@ -165,64 +165,80 @@ void ImageStore::configure(QString directory, qint64 budget, bool enabled) {
 }
 
 void ImageStore::lookup(Fd input, DecodeSpec spec, std::function<void(Lookup)> done) {
-    m_worker.start(
-        [this, input = std::move(input), spec, done = std::move(done), epoch = m_epoch]() mutable {
-            Lookup result;
-            result.epoch = epoch;
-            if (d->enabled && d->epoch == epoch && privateDirectory(d->directory)) {
-                // Only immutable decode inputs may create a publishable lookup.
-                const int seals = ::fcntl(input.get(), F_GET_SEALS);
-                if (seals >= 0 && (seals & MemfdSeals) == MemfdSeals)
-                    result.fingerprint = digest(input);
-                if (!result.fingerprint.isEmpty()) {
-                    auto version =
-                        d->version + libraryStamp(IMV_VIPS_PATH) + libraryStamp(IMV_MPV_PATH);
-                    if (spec.mode == DecodeSpec::Animation || spec.mode == DecodeSpec::Pixels)
-                        version += encode(spec);
-                    const auto parameter =
-                        QCryptographicHash::hash(version, QCryptographicHash::Sha256).toHex();
-                    result.path = QDir(d->directory)
-                                      .filePath(QString::fromLatin1(result.fingerprint + '-' +
-                                                                    parameter + ".imvqoi"));
-                    result.lease = d->acquire(result.path);
-                    QLockFile lock(QDir(d->directory).filePath(".imvqml.lock"));
-                    if (lock.tryLock(0)) {
-                        d->flushInvalidations();
-                        const Fd fd(d->invalidated(result.fingerprint)
-                                        ? -1
-                                        : ::open(QFile::encodeName(result.path).constData(),
-                                                 O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW));
-                        QFile file;
-                        struct stat stat{};
-                        if (fd && !::fstat(fd.get(), &stat) && S_ISREG(stat.st_mode) &&
-                            stat.st_size <= qMin(d->budget, MaxEntryBytes) &&
-                            file.open(fd.get(), QIODevice::ReadOnly)) {
-                            result.value = decodeEntry(file.read(stat.st_size), spec);
-                            if (result.value) {
-                                const timespec time[]{{0, UTIME_OMIT}, {0, UTIME_NOW}};
-                                ::futimens(fd.get(), time);
-                            } else {
-                                QFile::remove(result.path);
-                            }
+    queueLookup([fd = std::make_shared<const Fd>(std::move(input))] { return fd; }, spec,
+                std::move(done));
+}
+
+void ImageStore::lookup(std::weak_ptr<const Fd> input, DecodeSpec spec,
+                        std::function<void(Lookup)> done) {
+    queueLookup([input] { return input.lock(); }, spec, std::move(done));
+}
+
+void ImageStore::queueLookup(std::function<std::shared_ptr<const Fd>()> source, DecodeSpec spec,
+                             std::function<void(Lookup)> done) {
+    m_worker.start([this, source = std::move(source), spec, done = std::move(done),
+                    epoch = m_epoch]() mutable {
+        const auto input = source();
+        if (!input)
+            return;
+        Lookup result;
+        result.epoch = epoch;
+        if (d->enabled && d->epoch == epoch && privateDirectory(d->directory)) {
+            // Only immutable decode inputs may create a publishable lookup.
+            const int seals = ::fcntl(input->get(), F_GET_SEALS);
+            if (seals >= 0 && (seals & MemfdSeals) == MemfdSeals)
+                result.fingerprint = digest(*input);
+            if (!result.fingerprint.isEmpty()) {
+                auto version =
+                    d->version + libraryStamp(IMV_VIPS_PATH) + libraryStamp(IMV_MPV_PATH);
+                if (spec.mode == DecodeSpec::Animation || spec.mode == DecodeSpec::Pixels)
+                    version += encode(spec);
+                const auto parameter =
+                    QCryptographicHash::hash(version, QCryptographicHash::Sha256).toHex();
+                result.path = QDir(d->directory)
+                                  .filePath(QString::fromLatin1(result.fingerprint + '-' +
+                                                                parameter + ".imvqoi"));
+                result.lease = d->acquire(result.path);
+                QLockFile lock(QDir(d->directory).filePath(".imvqml.lock"));
+                if (lock.tryLock(0)) {
+                    d->flushInvalidations();
+                    const Fd fd(d->invalidated(result.fingerprint)
+                                    ? -1
+                                    : ::open(QFile::encodeName(result.path).constData(),
+                                             O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW));
+                    QFile file;
+                    struct stat stat{};
+                    if (fd && !::fstat(fd.get(), &stat) && S_ISREG(stat.st_mode) &&
+                        stat.st_size <= qMin(d->budget, MaxEntryBytes) &&
+                        file.open(fd.get(), QIODevice::ReadOnly)) {
+                        result.value = decodeEntry(file.read(stat.st_size), spec);
+                        if (result.value) {
+                            const timespec time[]{{0, UTIME_OMIT}, {0, UTIME_NOW}};
+                            ::futimens(fd.get(), time);
+                        } else {
+                            QFile::remove(result.path);
                         }
                     }
                 }
             }
-            QMetaObject::invokeMethod(
-                this,
-                [this, done = std::move(done), result = std::move(result)]() mutable {
-                    if (result.epoch != m_epoch)
-                        result = {};
-                    done(std::move(result));
-                },
-                Qt::QueuedConnection);
-        });
+        }
+        QMetaObject::invokeMethod(
+            this,
+            [this, done = std::move(done), result = std::move(result)]() mutable {
+                if (result.epoch != m_epoch)
+                    result = {};
+                done(std::move(result));
+            },
+            Qt::QueuedConnection);
+    });
 }
 
 void ImageStore::publish(Lookup lookup, Decoded decoded) {
-    if (!m_enabled || lookup.path.isEmpty() || lookup.epoch != m_epoch)
+    if (!m_enabled || lookup.path.isEmpty() || lookup.epoch != m_epoch ||
+        !m_pixelWrites.tryAcquire())
         return;
-    m_worker.start([this, lookup = std::move(lookup), decoded = std::move(decoded)] {
+    m_worker.start([this, permit = QSemaphoreReleaser(m_pixelWrites), lookup = std::move(lookup),
+                    decoded = std::move(decoded)] {
         if (lookup.epoch != d->epoch)
             return;
         const auto data = encodeEntry(decoded, d->budget);
@@ -242,15 +258,26 @@ void ImageStore::publish(Lookup lookup, Decoded decoded) {
     });
 }
 
-void ImageStore::clear() { invalidate({}); }
+void ImageStore::clear() { invalidate(Fd{}); }
 
 void ImageStore::invalidate(Fd input) {
-    m_worker.start([this, input = std::move(input), epoch = ++m_epoch] {
+    // The shared wrapper keeps the callable copyable for the worker API.
+    queueInvalidation(
+        [fd = std::make_shared<Fd>(std::move(input))] { return OpenedSource{std::move(*fd)}; });
+}
+
+void ImageStore::invalidate(QUrl url) {
+    queueInvalidation([url = std::move(url)] { return openSource(url); });
+}
+
+void ImageStore::queueInvalidation(std::function<OpenedSource()> source) {
+    m_worker.start([this, source = std::move(source), epoch = ++m_epoch] {
         d->epoch = epoch;
         if (d->directory.isEmpty() || !QFileInfo::exists(d->directory))
             return;
-        const auto fingerprint = input ? digest(input) : QByteArray{};
-        if (input && fingerprint.isEmpty()) {
+        const auto input = source();
+        const auto fingerprint = input.fd ? digest(input.fd) : QByteArray{};
+        if (input.error || (input.fd && fingerprint.isEmpty())) {
             qWarning("imvqml: Could not identify source for cache invalidation");
             return;
         }
@@ -284,8 +311,18 @@ QString thumbnailBucket(int size) {
 
 void ImageStore::thumbnail(QString path, struct stat before, QImage pixels, SourceInfo info,
                            int size, std::function<void(Failure, QUrl)> done) {
-    m_worker.start([this, path = std::move(path), before, pixels = std::move(pixels),
-                    info = std::move(info), size, done = std::move(done)]() mutable {
+    if (!m_pixelWrites.tryAcquire()) {
+        QMetaObject::invokeMethod(
+            this,
+            [done = std::move(done)] {
+                done({"store", "busy", "Thumbnail writer queue is full"}, {});
+            },
+            Qt::QueuedConnection);
+        return;
+    }
+    m_worker.start([this, permit = QSemaphoreReleaser(m_pixelWrites), path = std::move(path),
+                    before, pixels = std::move(pixels), info = std::move(info), size,
+                    done = std::move(done)]() mutable {
         const auto produce = [&]() -> QUrl {
             struct stat current{};
             const auto directoryKey = thumbnailBucket(size);

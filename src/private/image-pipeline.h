@@ -19,6 +19,7 @@ struct ImageAsset {
     int delay = 0;
     bool transient = false;
     ImageStore::Lease storeLease;
+    std::optional<struct stat> file;
 };
 using Asset = std::shared_ptr<const ImageAsset>;
 
@@ -30,18 +31,20 @@ public:
 
     explicit ImagePipeline(Pool &pool, QObject *parent = nullptr);
     Interest request(OpenedSource source, DecodeSpec spec, Done done);
+    Interest request(SourceInput source, DecodeSpec spec, Done done);
     Asset providerAsset(QImage pixels, QSize original, DecodeSpec spec);
     quint64 submissions() const { return m_submissions; }
 
 private:
     struct Pending {
         QByteArray key;
-        Fd input;
+        std::shared_ptr<Fd> input;
         DecodeSpec spec;
         int ticket = 0;
         QList<std::weak_ptr<const Done>> listeners;
         bool classified = false;
         ImageStore::Lookup cached;
+        std::optional<struct stat> file;
     };
     Interest interest(Done done, const std::shared_ptr<Pending> &pending = {});
     void finish(const std::shared_ptr<Pending> &pending, Decoded decoded, bool hit = false);

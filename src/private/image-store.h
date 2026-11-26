@@ -2,6 +2,7 @@
 #pragma once
 
 #include "decode-client.h"
+#include <QSemaphore>
 #include <QThreadPool>
 
 namespace Imv {
@@ -21,9 +22,11 @@ public:
     ~ImageStore() override;
     void configure(QString directory, qint64 budget, bool enabled);
     void lookup(Fd input, DecodeSpec spec, std::function<void(Lookup)> done);
+    void lookup(std::weak_ptr<const Fd> input, DecodeSpec spec, std::function<void(Lookup)> done);
     void publish(Lookup lookup, Decoded decoded);
     void clear();
     void invalidate(Fd input);
+    void invalidate(QUrl url);
     bool enabled() const { return m_enabled; }
     quint64 epoch() const { return m_epoch; }
     void thumbnail(QString path, struct stat revision, QImage pixels, SourceInfo info, int size,
@@ -32,7 +35,11 @@ public:
 private:
     struct Worker;
     std::unique_ptr<Worker> d;
+    QSemaphore m_pixelWrites{2};
     QThreadPool m_worker;
+    void queueLookup(std::function<std::shared_ptr<const Fd>()> source, DecodeSpec spec,
+                     std::function<void(Lookup)> done);
+    void queueInvalidation(std::function<OpenedSource()> source);
     quint64 m_epoch = 1;
     bool m_enabled = false;
 };

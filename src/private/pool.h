@@ -55,7 +55,8 @@ public:
     };
 
     explicit Pool(QObject *parent = nullptr);
-    explicit Pool(Factory factory, int capacity, unsigned maxReuse, QObject *parent = nullptr);
+    explicit Pool(Factory factory, int capacity, unsigned maxReuse, QObject *parent = nullptr,
+                  int previousTicket = 0);
     ~Pool() override;
 
     // GUI-affine, local admission only. The callback cannot run inline.

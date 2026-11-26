@@ -2,9 +2,15 @@
 #include <cstdlib>
 #include <mpv/client.h>
 #include <mpv/render.h>
+#include <unistd.h>
 
 unsigned long mpv_client_api_version() { return MPV_MAKE_VERSION(2, 0); }
-mpv_handle *mpv_create() { std::abort(); }
+mpv_handle *mpv_create() {
+    if (std::getenv("IMV_MPV_FAULT_HANG"))
+        for (;;)
+            ::pause();
+    std::abort();
+}
 int mpv_initialize(mpv_handle *) { return MPV_ERROR_GENERIC; }
 void mpv_terminate_destroy(mpv_handle *) {}
 int mpv_set_option_string(mpv_handle *, const char *, const char *) { return MPV_ERROR_GENERIC; }

@@ -36,6 +36,8 @@ ImagePipeline::Interest ImagePipeline::request(OpenedSource source, DecodeSpec s
         source.error = {"admission", "invalid-size", "Physical size exceeds the output edge limit"};
     prune();
     auto asset = m_assets.value(key).lock();
+    if (!source.error && !asset && !m_pending.contains(key) && m_pending.size() >= 8)
+        source.error = {"admission", "busy", "Display decode queue is full"};
     if (source.error || asset) {
         auto lease = interest(std::move(done));
         QMetaObject::invokeMethod(
@@ -50,10 +52,11 @@ ImagePipeline::Interest ImagePipeline::request(OpenedSource source, DecodeSpec s
     }
     auto &entry = m_pending[key];
     if (!entry) {
-        entry = std::make_shared<Pending>(Pending{key, std::move(source.fd), spec, 0, {}});
+        entry = std::make_shared<Pending>(Pending{
+            key, std::make_shared<Fd>(std::move(source.fd)), spec, 0, {}, false, {}, source.file});
         if (store.enabled()) {
             store.lookup(
-                duplicateSource(entry->input), spec,
+                std::weak_ptr<const Fd>(entry->input), spec,
                 [self = QPointer(this), pending = std::weak_ptr(entry)](ImageStore::Lookup result) {
                     auto request = pending.lock();
                     if (!self || !request || self->m_pending.value(request->key) != request)
@@ -77,6 +80,38 @@ ImagePipeline::Interest ImagePipeline::request(OpenedSource source, DecodeSpec s
     return lease;
 }
 
+ImagePipeline::Interest ImagePipeline::request(SourceInput source, DecodeSpec spec, Done done) {
+    struct Request {
+        std::shared_ptr<void> preparing;
+        Interest child;
+    };
+    const auto state = std::make_shared<Request>();
+    auto handle =
+        Interest(new Done(std::move(done)), [state](const Done *callback) { delete callback; });
+    const auto weak = std::weak_ptr(handle);
+    state->preparing = prepareSource(std::move(source), [weak, request = std::weak_ptr(state),
+                                                         self = QPointer(this),
+                                                         spec](OpenedSource input) {
+        const auto active = request.lock();
+        if (!self || !active)
+            return;
+        active->preparing.reset();
+        active->child = self->request(std::move(input), spec, [weak](Asset asset, Failure error) {
+            if (auto callback = weak.lock())
+                (*callback)(std::move(asset), std::move(error));
+        });
+    });
+    if (!state->preparing)
+        QMetaObject::invokeMethod(
+            this,
+            [weak] {
+                if (auto callback = weak.lock())
+                    (*callback)({}, {"admission", "busy", "Source preparation queue is full"});
+            },
+            Qt::QueuedConnection);
+    return handle;
+}
+
 void ImagePipeline::pumpLater() {
     if (std::exchange(m_scheduled, true))
         return;
@@ -85,13 +120,13 @@ void ImagePipeline::pumpLater() {
 
 void ImagePipeline::pump() {
     m_scheduled = false;
-    while (!m_waiting.isEmpty() && m_pool.available()) {
+    while (!m_waiting.isEmpty() && m_pool.capacity() != Pool::Admission::Busy) {
         const auto request = m_waiting.takeFirst().lock();
         if (!request || m_pending.value(request->key) != request)
             continue;
         const bool classify = request->spec.mode == DecodeSpec::Animation && !request->classified;
         const auto ticket = submitDecode(
-            m_pool, duplicateSource(request->input), classify ? DecodeSpec{} : request->spec,
+            m_pool, duplicateSource(*request->input), classify ? DecodeSpec{} : request->spec,
             [self = QPointer(this), request, classify](Decoded decoded) {
                 if (!self || self->m_pending.value(request->key) != request)
                     return;
@@ -127,11 +162,10 @@ void ImagePipeline::finish(const std::shared_ptr<Pending> &request, Decoded deco
         imageStore().publish(request->cached, decoded);
     Asset asset;
     if (!decoded.error) {
-        auto stream =
-            decoded.stream ? std::make_shared<const Fd>(std::move(request->input)) : nullptr;
+        auto stream = decoded.stream ? request->input : nullptr;
         asset = exchangeAsset({request->key, std::move(decoded.source), std::move(decoded.pixels),
                                std::move(decoded.animation), std::move(stream), request->spec,
-                               decoded.delay, false, request->cached.lease});
+                               decoded.delay, false, request->cached.lease, request->file});
     }
     for (const auto &weak : std::as_const(request->listeners)) {
         if (const auto callback = weak.lock())

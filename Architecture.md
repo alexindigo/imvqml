@@ -20,8 +20,9 @@ most 32 completed requests per child. It exposes a factory of injectable
 children implementing the same transport and retirement signals. Every local
 positive ticket has an independent wire serial and one terminal owner, consumed
 before queuing delivery. Nonblocking notifiers are armed only for relevant I/O.
-One precise timer per admitted slot enforces the wall-clock budget; a reply
-drained after the deadline cannot revive an expired ticket. Cancel, timeout,
+One precise timer per admitted slot tracks the wall-clock budget; a reply
+drained after the deadline cannot revive an expired ticket. A monotonic kernel
+timer in the helper kills a wedged backend independently of GUI events. Cancel, timeout,
 garbage and crash all converge on the same terminal ledger. Capacity remains
 occupied through child reaping if a child must stop, and release is delivered
 after the terminal callback. Pool destruction closes sockets and requests child
@@ -51,7 +52,10 @@ The pool's still deadline is 8 seconds and helper address space is 1 GiB.
 
 `ImvImageJob` maps client IDs to the pool ledger and separates inspect,
 sample and render results. Export passes already-decoded pixels to a Qt
-worker for encoding. It stages in a descriptor-held directory and a
+worker for encoding. Two job permits cover provider or helper work through
+encoding and delivery. A separate bounded source queue materializes encoded
+inputs outside the GUI thread; pending store lookups borrow their caller's input.
+Export stages in a descriptor-held directory and a
 single cancellation/publication gate precedes `linkat` no-clobber commit.
 
 ## Display

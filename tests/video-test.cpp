@@ -1,10 +1,38 @@
 // SPDX-License-Identifier: LGPL-3.0-only
+#include "decode-client.h"
+#include "helper.h"
+#include <QProcess>
 #include <QtTest>
 #include <imvqml/imvimagejob.h>
+#include <poll.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 
 class VideoTest : public QObject {
     Q_OBJECT
 private slots:
+    void watchdogWithoutGui() {
+        using namespace Imv;
+        QProcess process;
+        SeqPacket wire(startChild(process, decoderPath()));
+        QVERIFY(process.waitForStarted(2000));
+        Fd pidfd(int(::syscall(SYS_pidfd_open, process.processId(), 0)));
+        QVERIFY(pidfd);
+        auto source = openSource(QUrl::fromLocalFile(IMV_FIXTURES "/seek.webm"));
+        QVERIFY(source.fd);
+        Frame frame{Kind::Request, 1, encode(DecodeSpec{}), {}};
+        frame.fds.push_back(std::move(source.fd));
+        QCOMPARE(wire.send(frame), Io::Ok);
+        // No Qt GUI/pool events are dispatched during this wait.
+        struct pollfd exit{pidfd.get(), POLLIN, 0};
+        const int retired = ::poll(&exit, 1, StillDeadlineMs + 1500);
+        if (retired != 1)
+            process.kill();
+        QVERIFY(process.waitForFinished(2000));
+        QCOMPARE(retired, 1);
+        QCOMPARE(process.exitStatus(), QProcess::CrashExit);
+    }
+
     void samples_data() {
         QTest::addColumn<QString>("file");
         QTest::addColumn<double>("position");

@@ -4,7 +4,9 @@
 #include <QCryptographicHash>
 #include <QFile>
 #include <QPointer>
+#include <QThreadPool>
 #include <QtEndian>
+#include <atomic>
 #include <cerrno>
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -18,6 +20,19 @@ OpenedSource fail(QString stage, QString code, QString detail) {
 }
 
 using Mapping = std::shared_ptr<const uchar>;
+class SourceWorker : public QObject {
+public:
+    explicit SourceWorker(QObject *parent) : QObject(parent) { pool.setMaxThreadCount(2); }
+    QThreadPool pool;
+};
+
+struct SourceTask {
+    SourceInput input;
+    SourceReady ready;
+    std::shared_ptr<std::atomic_bool> live;
+    std::atomic<int> &outstanding;
+    ~SourceTask() { --outstanding; }
+};
 QImage imageView(const Mapping &mapping, QSize size, qint64 offset) {
     return QImage(
         mapping.get() + offset, size.width(), size.height(), size.width() * 4,
@@ -30,6 +45,72 @@ bool sealedOutput(int fd, qint64 bytes) {
     const int seals = ::fcntl(fd, F_GET_SEALS);
     return bytes > 0 && seals >= 0 && (seals & MemfdSeals) == MemfdSeals && !::fstat(fd, &info) &&
            S_ISREG(info.st_mode) && info.st_size == bytes;
+}
+
+OpenedSource openData(const QUrl &url) {
+    if (!url.isValid() || url.hasFragment() || !url.authority().isEmpty())
+        return fail("admission", "invalid-source", "Malformed data URL");
+    // QUrl already owns its encoded text. Materialize only one normalized
+    // representation; decode it into the sealed file in bounded blocks.
+    const auto text = url.toString(QUrl::RemoveScheme | QUrl::FullyEncoded);
+    const auto comma = text.indexOf(',');
+    if (comma < 0 || comma > 1024)
+        return fail("admission", "invalid-source", "Data URL lacks a bounded metadata field");
+    const bool base64 = QStringView(text).first(comma).endsWith(u";base64");
+    const auto hex = [](ushort c) {
+        return c >= '0' && c <= '9'   ? int(c - '0')
+               : c >= 'A' && c <= 'F' ? int(c - 'A' + 10)
+               : c >= 'a' && c <= 'f' ? int(c - 'a' + 10)
+                                      : -1;
+    };
+    auto fd = newMemfd("imvqml-data-source");
+    if (!fd)
+        return fail("open", "unreadable", "Could not allocate the byte descriptor");
+    QByteArray block;
+    constexpr qsizetype BlockSize = 64 * 1024;
+    block.reserve(BlockSize);
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    qint64 size = 0;
+    bool padded = false;
+    for (qsizetype i = comma + 1; i <= text.size();) {
+        if (i < text.size()) {
+            auto c = text[i++].unicode();
+            if (c == '%' && i + 1 < text.size()) {
+                const int high = hex(text[i].unicode()), low = hex(text[i + 1].unicode());
+                if (high >= 0 && low >= 0) {
+                    c = ushort((high << 4) | low);
+                    i += 2;
+                }
+            }
+            if (padded || c > 255)
+                return fail("admission", "invalid-source", "Malformed data URL payload");
+            block.append(char(c));
+            if (block.size() != BlockSize)
+                continue;
+        } else {
+            ++i;
+            if (block.isEmpty())
+                break;
+        }
+        if (base64) {
+            padded = block.contains('=');
+            auto decoded = QByteArray::fromBase64Encoding(std::move(block),
+                                                          QByteArray::AbortOnBase64DecodingErrors);
+            if (!decoded)
+                return fail("admission", "invalid-source", "Malformed base64 data URL");
+            block = std::move(decoded.decoded);
+        }
+        if (block.size() > MaxSourceBytes - size)
+            return fail("admission", "too-large", "Source exceeds 256 MiB");
+        if (!writeAll(fd.get(), block.constData(), block.size(), size))
+            return fail("open", "unreadable", "Could not write the byte descriptor");
+        size += block.size();
+        hash.addData(block);
+        block.clear();
+    }
+    if (::fcntl(fd.get(), F_ADD_SEALS, MemfdSeals) < 0)
+        return fail("open", "unreadable", "Could not seal the byte descriptor");
+    return {std::move(fd), "bytes/" + hash.result().toHex(), {}};
 }
 
 Failure translate(DecodeCode code, QString detail) {
@@ -79,26 +160,8 @@ QString localPath(const QUrl &url) {
 }
 
 OpenedSource openSource(const QUrl &url) {
-    if (url.scheme() == "data") {
-        if (!url.isValid() || url.hasFragment())
-            return fail("admission", "invalid-source", "Malformed data URL");
-        if (url.toString().size() > 4 * MaxSourceBytes + 1024)
-            return fail("admission", "too-large", "Encoded source exceeds the data URL limit");
-        const auto data = url.toEncoded(QUrl::RemoveScheme);
-        const auto comma = data.indexOf(',');
-        if (comma < 0 || comma > 1024)
-            return fail("admission", "invalid-source", "Data URL lacks a bounded metadata field");
-        const QByteArray payload = QByteArray::fromPercentEncoding(data.sliced(comma + 1));
-        if (!data.first(comma).endsWith(";base64"))
-            return openSource(payload);
-        if (payload.size() > (MaxSourceBytes + 2) / 3 * 4)
-            return fail("admission", "too-large", "Base64 source exceeds the source byte limit");
-        const auto decoded =
-            QByteArray::fromBase64Encoding(payload, QByteArray::AbortOnBase64DecodingErrors);
-        if (!decoded)
-            return fail("admission", "invalid-source", "Malformed base64 data URL");
-        return openSource(decoded.decoded);
-    }
+    if (url.scheme() == "data")
+        return openData(url);
     const auto path = localPath(url);
     if (path.isEmpty())
         return fail("admission", "invalid-source",
@@ -148,6 +211,36 @@ OpenedSource openSource(const QByteArray &bytes) {
     return {std::move(fd),
             "bytes/" + QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex(),
             {}};
+}
+
+std::shared_ptr<void> prepareSource(SourceInput input, SourceReady ready) {
+    static QPointer<SourceWorker> service;
+    static std::atomic<int> outstanding;
+    constexpr int SourceCapacity = 4;
+    if (outstanding.load() >= SourceCapacity)
+        return {};
+    if (!service)
+        service = new SourceWorker(QCoreApplication::instance());
+    auto live = std::make_shared<std::atomic_bool>(true);
+    auto task = std::shared_ptr<SourceTask>(
+        new SourceTask{std::move(input), std::move(ready), live, outstanding});
+    ++outstanding;
+    service->pool.start([owner = service.data(), weak = std::weak_ptr(task)] {
+        const auto task = weak.lock();
+        if (!task || !task->live->load())
+            return;
+        auto result = std::visit([](const auto &input) { return openSource(input); }, task->input);
+        task->input = QUrl{};
+        if (task->live->load())
+            QMetaObject::invokeMethod(
+                owner,
+                [task, result = std::move(result)]() mutable {
+                    if (task->live->load())
+                        task->ready(std::move(result));
+                },
+                Qt::QueuedConnection);
+    });
+    return {task.get(), [task = std::move(task)](void *) { *task->live = false; }};
 }
 
 Pool &decoderPool() {

@@ -101,6 +101,10 @@ once, queued, while the receiver exists. The result always includes `stage`,
 `code`, `detail`; success is `complete` with empty code and detail. `-2`
 means temporarily busy; retry with backoff. `-3` signals ticket exhaustion.
 Negative admissions do not emit `finished`.
+Provider and encoded jobs use the same end-to-end admission budget. An
+admitted export occupies its slot through encoding and publication. Encoded
+source preparation is asynchronous, and display and thumbnail requests may
+report `busy` during saturation.
 
 The process pool is private. Its capacity pressure is retryable admission
 (`Busy`), not a terminal error. Process outcomes carry `stage: "helper"`

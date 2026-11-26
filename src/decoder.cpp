@@ -3,8 +3,10 @@
 #include "vips-decode.h"
 
 #include <fcntl.h>
+#include <signal.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#include <time.h>
 
 namespace {
 Imv::DecodeReport decodeInput(int input, int output, const Imv::DecodeSpec &spec) {
@@ -32,6 +34,13 @@ int main(int, char **argv) {
         return 2;
     if (!Imv::initializeVips(argv[0]))
         return 3;
+    // Deadline enforcement must not depend on the Qt GUI event loop.
+    sigevent expiry{};
+    expiry.sigev_notify = SIGEV_SIGNAL;
+    expiry.sigev_signo = SIGKILL;
+    timer_t watchdog{};
+    if (::timer_create(CLOCK_MONOTONIC, &expiry, &watchdog))
+        return 4;
     Imv::SeqPacket transport{Imv::Fd(Imv::ChildSocket)};
     for (;;) {
         Imv::Frame frame;
@@ -49,6 +58,11 @@ int main(int, char **argv) {
                 return 1;
             const auto input = frame.fds.front().get();
             const auto output = frame.fds.size() == 2 ? frame.fds.back().get() : -1;
+            const auto ms = spec.mode >= Imv::DecodeSpec::Animation ? Imv::AnimationDeadlineMs
+                                                                    : Imv::StillDeadlineMs;
+            const itimerspec deadline{{}, {ms / 1000, (ms % 1000) * 1000000L}};
+            if (::timer_settime(watchdog, 0, &deadline, nullptr))
+                return 4;
             auto result = decodeInput(input, output, spec);
             if (output >= 0 && result.code == Imv::DecodeCode::Ok &&
                 !Imv::sealPixelOutput(output, result.outputBytes())) {
@@ -61,5 +75,8 @@ int main(int, char **argv) {
             return 1;
         if (transport.send(frame) != Imv::Io::Ok)
             return 1;
+        const itimerspec idle{};
+        if (::timer_settime(watchdog, 0, &idle, nullptr))
+            return 4;
     }
 }

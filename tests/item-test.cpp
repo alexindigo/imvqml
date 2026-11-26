@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 #include "image-node.h"
+#include <QBuffer>
 #include <QColor>
 #include <QFile>
 #include <QQmlComponent>
@@ -19,6 +20,7 @@ private slots:
     void transientProvider();
     void transientProviderJob();
     void transientAsyncProviderJob();
+    void masks();
     void animation();
     void cachePolicy();
 };
@@ -296,6 +298,58 @@ Window {
     QCOMPARE(pixel(72, 16), QColor(Qt::red));
     QCOMPARE(Imv::imagePipeline().submissions(), beforeHit);
     QCOMPARE(Imv::textureUploads(), beforeReuse);
+}
+
+void ItemTest::masks() {
+    QQuickWindow window;
+    window.resize(128, 96);
+    window.setColor(Qt::blue);
+    Imv::ImvImage item(window.contentItem());
+    item.setSize({96, 64});
+    item.setFillMode(Imv::ImvImage::Stretch);
+    item.setSmooth(false);
+    QImage source(96, 64, QImage::Format_RGBA8888);
+    source.fill(Qt::red);
+    QBuffer encoded;
+    QVERIFY(encoded.open(QIODevice::WriteOnly));
+    QVERIFY(source.save(&encoded, "PNG"));
+    item.setBytes(encoded.data());
+    window.show();
+    QTRY_COMPARE(item.status(), Imv::ImvImage::Ready);
+    const auto sample = [&] {
+        const QImage frame = window.grabWindow();
+        if (frame.isNull())
+            return QString("no frame");
+        const qreal dpr = frame.devicePixelRatio();
+        const auto at = [&](int x, int y) {
+            return frame.pixelColor(qRound(x * dpr), qRound(y * dpr));
+        };
+        bool blended = false;
+        for (int y = 0; y < 31; ++y) {
+            for (int x = 0; x < 48; ++x) {
+                const auto p = at(x, y);
+                blended = blended || (p.red() > 8 && p.blue() > 8 && p.green() < 8);
+            }
+        }
+        return QString("%1 %2 %3 %4 %5 edge=%6")
+            .arg(at(1, 1).name(), at(94, 1).name(), at(1, 62).name(), at(94, 62).name(),
+                 at(48, 32).name(), QString::number(blended));
+    };
+    const QString square("#ff0000 #ff0000 #ff0000 #ff0000 #ff0000 edge=0");
+    const QString clipped("#0000ff #0000ff #0000ff #0000ff #ff0000 edge=1");
+    QTRY_COMPARE(sample(), square);
+    item.setMask(Imv::ImvImage::Circle);
+    QTest::qWait(120);
+    const auto circle = sample();
+    item.setMask(Imv::ImvImage::Rounded);
+    item.setRadius(20);
+    QTest::qWait(120);
+    const auto rounded = sample();
+    qInfo() << "graphics API" << window.rendererInterface()->graphicsApi() << "circle" << circle
+            << "rounded" << rounded;
+    QCOMPARE(circle + '|' + rounded, clipped + '|' + clipped);
+    item.setRadius(0);
+    QTRY_COMPARE(sample(), square);
 }
 
 void ItemTest::animation() {

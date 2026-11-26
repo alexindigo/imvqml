@@ -27,6 +27,11 @@ application for providers.
 | `sourceInfo` | `format`, oriented `width` and `height`, `frames`, `loop`; empty before an accepted result |
 | `errorStage`, `errorCode`, `errorDetail` | The same failure vocabulary as jobs, plus `upload/texture-failed` |
 
+Circle and rounded masks use antialiased pixel alpha in both the default and
+software Qt Quick renderers. The circle is centered and inscribed in the item;
+a rounded mask with radius zero is rectangular. Masking affects display only,
+not the pixels returned or exported by a job.
+
 The request size is the item size times the window DPR, rounded up. Per-edge
 resize jitter below the greater of 4 physical pixels and one eighth of the
 previous requested edge reuses the prior decode. Old pixels can stay visible

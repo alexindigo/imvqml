@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 #include "image-node.h"
 
+#include <QDataStream>
+#include <QPainter>
+#include <QPainterPath>
 #include <QQuickWindow>
 #include <QSGSimpleTextureNode>
 #include <QtMath>
@@ -13,31 +16,106 @@ namespace {
 constexpr qint64 TextureBudget = 128ll * 1024 * 1024;
 std::atomic<quint64> uploads;
 
+struct Layout {
+    QRectF target, source;
+};
+
+Layout layoutImage(QSizeF size, QSizeF pixels, ImvImage::FillMode fill) {
+    const QRectF box(QPointF{}, size);
+    Layout result{box, QRectF(QPointF{}, pixels)};
+    if (fill == ImvImage::Contain) {
+        result.target.setSize(pixels.scaled(size, Qt::KeepAspectRatio));
+        result.target.moveCenter(box.center());
+    } else if (fill == ImvImage::Cover) {
+        result.source.setSize(size.scaled(pixels, Qt::KeepAspectRatio));
+        result.source.moveCenter(QRectF(QPointF{}, pixels).center());
+    }
+    return result;
+}
+
+struct Presentation {
+    QSizeF size;
+    QSize raster;
+    ImvImage::FillMode fill;
+    ImvImage::Mask mask;
+    qreal radius;
+    bool smooth;
+
+    QByteArray key(const Asset &asset) const {
+        QByteArray bytes;
+        QDataStream key(&bytes, QIODeviceBase::WriteOnly);
+        key << asset->key << quint8(mask);
+        if (mask != ImvImage::NoMask)
+            key << size << raster << quint8(fill) << radius << smooth;
+        return bytes;
+    }
+
+    QImage image(const QImage &pixels) const {
+        if (mask == ImvImage::NoMask)
+            return pixels;
+        if (!rgbaBytes(raster))
+            return {};
+        QImage result(raster, QImage::Format_ARGB32_Premultiplied);
+        if (result.isNull())
+            return {};
+        result.fill(Qt::transparent);
+        QPainter painter(&result);
+        painter.scale(raster.width() / size.width(), raster.height() / size.height());
+        painter.setRenderHint(QPainter::SmoothPixmapTransform, smooth);
+        const auto placement = layoutImage(size, pixels.size(), fill);
+        painter.drawImage(placement.target, pixels, placement.source);
+        const QRectF box(QPointF{}, size);
+        QPainterPath outside;
+        outside.addRect(box);
+        if (mask == ImvImage::Circle) {
+            QRectF disk(QPointF{}, QSizeF(radius * 2, radius * 2));
+            disk.moveCenter(box.center());
+            outside.addEllipse(disk);
+        } else {
+            outside.addRoundedRect(box, radius, radius);
+        }
+        // Odd-even fill removes the area outside the mask, while preserving
+        // antialiased alpha and the source's existing transparency inside.
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setCompositionMode(QPainter::CompositionMode_DestinationOut);
+        painter.fillPath(outside, Qt::black);
+        painter.end();
+        return result;
+    }
+};
+
 struct Entry {
     Asset asset;
+    QByteArray key;
+    QSize size;
     std::unique_ptr<QSGTexture> texture;
-    qint64 bytes() const { return rgbaBytes(asset->pixels.size()); }
+    qint64 bytes() const { return rgbaBytes(size); }
 };
 
 class TextureCache {
 public:
     QMetaObject::Connection invalidation;
 
-    std::shared_ptr<Entry> acquire(QQuickWindow *window, const Asset &asset) {
-        const auto found = m_index.constFind(asset->key);
+    std::shared_ptr<Entry> acquire(QQuickWindow *window, const Asset &asset,
+                                   const Presentation &presentation, QByteArray key) {
+        const auto found = m_index.constFind(key);
         if (found != m_index.cend()) {
             m_lru.splice(m_lru.begin(), m_lru, *found);
             return m_lru.front();
         }
-        auto texture = std::unique_ptr<QSGTexture>(window->createTextureFromImage(asset->pixels));
+        const auto image = presentation.image(asset->pixels);
+        if (image.isNull())
+            return {};
+        auto texture = std::unique_ptr<QSGTexture>(window->createTextureFromImage(image));
         if (!texture)
             return {};
         uploads.fetch_add(1, std::memory_order_relaxed);
-        auto entry = std::make_shared<Entry>(Entry{asset, std::move(texture)});
+        auto entry =
+            std::make_shared<Entry>(Entry{asset, std::move(key), image.size(), std::move(texture)});
         if (asset->transient)
             return entry;
         m_lru.push_front(entry);
-        m_index.insert(asset->key, m_lru.begin());
+        m_index.insert(entry->key, m_lru.begin());
         m_bytes += entry->bytes();
         trim();
         return entry;
@@ -50,7 +128,7 @@ public:
             if (cursor->use_count() != 1)
                 continue;
             m_bytes -= (*cursor)->bytes();
-            m_index.remove((*cursor)->asset->key);
+            m_index.remove((*cursor)->key);
             cursor = m_lru.erase(cursor);
         }
     }
@@ -81,12 +159,10 @@ std::shared_ptr<TextureCache> forGraph(QQuickWindow *window) {
     return cache;
 }
 
-class ImageNode : public QSGClipNode {
+class ImageNode : public QSGNode {
 public:
     explicit ImageNode(const std::shared_ptr<TextureCache> &cache) : m_cache(cache) {
         appendChildNode(m_image);
-        setGeometry(new QSGGeometry(QSGGeometry::defaultAttributes_Point2D(), 0));
-        setFlag(OwnsGeometry);
     }
 
     ~ImageNode() override {
@@ -96,11 +172,12 @@ public:
             cache->trim();
     }
 
-    bool sync(QQuickWindow *window, const Asset &asset) {
-        if (m_lease && m_lease->asset == asset)
+    bool sync(QQuickWindow *window, const Asset &asset, const Presentation &presentation) {
+        auto key = presentation.key(asset);
+        if (m_lease && m_lease->key == key)
             return true;
         const auto cache = m_cache.lock();
-        auto lease = cache ? cache->acquire(window, asset) : nullptr;
+        auto lease = cache ? cache->acquire(window, asset, presentation, std::move(key)) : nullptr;
         if (!lease)
             return false;
         m_image->setTexture(lease->texture.get());
@@ -109,72 +186,21 @@ public:
         return true;
     }
 
-    void layout(QSizeF size, ImvImage::FillMode fill, ImvImage::Mask mask, qreal radius,
-                bool smooth) {
-        const auto pixels = QSizeF(m_lease->asset->pixels.size());
-        const QRectF box(QPointF{}, size);
-        QRectF source(QPointF{}, pixels), target = box;
-        if (fill == ImvImage::Contain) {
-            target.setSize(pixels.scaled(size, Qt::KeepAspectRatio));
-            target.moveCenter(box.center());
-        } else if (fill == ImvImage::Cover) {
-            source.setSize(size.scaled(pixels, Qt::KeepAspectRatio));
-            source.moveCenter(QRectF(QPointF{}, pixels).center());
-        }
-        m_image->setRect(target);
-        m_image->setSourceRect(source);
-        m_image->setFiltering(smooth ? QSGTexture::Linear : QSGTexture::Nearest);
-
-        QRectF shape = box;
-        if (mask == ImvImage::Circle) {
-            radius = qMin(size.width(), size.height()) / 2;
-            shape.setSize({radius * 2, radius * 2});
-            shape.moveCenter(box.center());
-        } else {
-            radius =
-                mask == ImvImage::Rounded ? qMin(radius, qMin(size.width(), size.height()) / 2) : 0;
-        }
-        if (shape == m_shape && radius == m_radius)
-            return;
-        m_shape = shape;
-        m_radius = radius;
-        setClipRect(shape);
-        setIsRectangular(radius <= 0);
-        auto *mesh = geometry();
-        if (radius <= 0) {
-            mesh->allocate(4);
-            mesh->setDrawingMode(QSGGeometry::DrawTriangleStrip);
-            QSGGeometry::updateRectGeometry(mesh, shape);
-        } else {
-            // Triangle strip with the perimeter alternating against the center;
-            // triangle fans are not available on every RHI backend.
-            constexpr int Steps = 16;
-            constexpr int Points = (Steps + 1) * 4;
-            mesh->allocate(Points * 2 + 1);
-            mesh->setDrawingMode(QSGGeometry::DrawTriangleStrip);
-            auto *vertices = mesh->vertexDataAsPoint2D();
-            const QPointF centers[]{{shape.right() - radius, shape.bottom() - radius},
-                                    {shape.left() + radius, shape.bottom() - radius},
-                                    {shape.left() + radius, shape.top() + radius},
-                                    {shape.right() - radius, shape.top() + radius}};
-            for (int i = 0; i < Points; ++i) {
-                const int corner = i / (Steps + 1);
-                const auto angle = (corner + qreal(i % (Steps + 1)) / Steps) * (M_PI / 2);
-                vertices[i * 2].set(centers[corner].x() + qCos(angle) * radius,
-                                    centers[corner].y() + qSin(angle) * radius);
-                vertices[i * 2 + 1].set(shape.center().x(), shape.center().y());
-            }
-            vertices[Points * 2] = vertices[0];
-        }
-        markDirty(DirtyGeometry);
+    void layout(const Presentation &presentation) {
+        const auto pixels = QSizeF(m_lease->size);
+        const auto placement =
+            presentation.mask == ImvImage::NoMask
+                ? layoutImage(presentation.size, pixels, presentation.fill)
+                : Layout{QRectF(QPointF{}, presentation.size), QRectF(QPointF{}, pixels)};
+        m_image->setRect(placement.target);
+        m_image->setSourceRect(placement.source);
+        m_image->setFiltering(presentation.smooth ? QSGTexture::Linear : QSGTexture::Nearest);
     }
 
 private:
     std::weak_ptr<TextureCache> m_cache;
     std::shared_ptr<Entry> m_lease;
     QSGSimpleTextureNode *m_image = new QSGSimpleTextureNode;
-    QRectF m_shape;
-    qreal m_radius = -1;
 };
 } // namespace
 
@@ -183,11 +209,21 @@ QSGNode *updateImageNode(QSGNode *old, QQuickWindow *window, const Asset &asset,
     auto node = std::unique_ptr<ImageNode>(static_cast<ImageNode *>(old));
     if (!asset || size.isEmpty())
         return nullptr;
+    const auto limit = qMin(size.width(), size.height()) / 2;
+    radius = mask == ImvImage::Circle ? limit : qMin(radius, limit);
+    if (radius <= 0)
+        mask = ImvImage::NoMask;
+    const auto dpr = window->effectiveDevicePixelRatio();
+    const auto edge = [dpr](qreal logical) {
+        return qCeil(qMin(qreal(MaxEdge + 1), logical * dpr));
+    };
+    const Presentation presentation{
+        size, QSize(edge(size.width()), edge(size.height())), fill, mask, radius, smooth};
     if (!node)
         node = std::make_unique<ImageNode>(forGraph(window));
-    if (!node->sync(window, asset))
+    if (!node->sync(window, asset, presentation))
         return nullptr;
-    node->layout(size, fill, mask, radius, smooth);
+    node->layout(presentation);
     return node.release();
 }
 

@@ -69,12 +69,14 @@ that snapshot, so geometry changes cannot re-request transient provider pixels.
 
 Each window's scene graph owns a render-thread texture LRU. Scene-graph nodes
 hold texture leases; texture entries hold the decoded asset for reuse. One
-texture is shared across matching items regardless of mask or filtering.
-Eviction is least-recently-used among unleased entries, trimmed at cache
-pressure and on release; active leases can temporarily exceed the 128 MiB
-target. Scene-graph invalidation drops the cache on the render thread. Item
-geometry, source rectangles and clip geometry are Qt scene-graph operations,
-not a custom GL renderer.
+texture is shared across matching presentations. Masks are antialiased alpha
+variants generated at the texture boundary, so they work with software and
+GPU renderers without requiring separate decodes or disk entries. The texture
+key includes the active mask, radius, fill, output geometry, and sampling mode
+for masked presentations. Eviction is least-recently-used among unleased
+entries, trimmed at cache pressure and on release; active leases can temporarily
+exceed the 128 MiB target. Scene-graph invalidation drops the cache on the
+render thread.
 
 ## Animation
 

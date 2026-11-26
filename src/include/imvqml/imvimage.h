@@ -75,6 +75,7 @@ private:
     struct State;
     std::unique_ptr<State> d;
     void resetRequest(bool discard);
+    void syncPlayback();
     void setOutcome(Status status, QString stage = {}, QString code = {}, QString detail = {});
 };
 

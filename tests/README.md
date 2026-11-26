@@ -26,6 +26,8 @@ session, run `QT_QPA_PLATFORM=wayland ctest --test-dir build --output-on-failure
 -L wayland` on one line. `items` requires a presented Qt Quick window and
 reads back its rendered pixels for fill, masks, resize and source changes.
 Private counters prove decode and texture sharing and reuse.
+The same two lanes check exact GIF/WebP frame delays, elapsed playback and
+finite loops, and dedicated playback-helper pause/resume with a large GIF.
 
 To rerun the persistent-format measurement inside the guest niri session,
 use `QT_QPA_PLATFORM=wayland build/tests/imv-store-benchmark` with the

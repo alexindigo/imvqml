@@ -3,6 +3,7 @@
 
 #include "private/image-node.h"
 #include "private/image-provider.h"
+#include "private/playback.h"
 #include <QQmlContext>
 #include <QQmlEngine>
 #include <QQuickWindow>
@@ -36,11 +37,14 @@ struct ImvImage::State {
     quint64 assetGeneration = 0;
     quint64 reported = 0; // Last generation queued by scene graph sync.
     Asset asset;
+    std::unique_ptr<Playback> playback;
+    QMetaObject::Connection windowVisibility;
     ImagePipeline::Interest interest;
     std::function<void()> cancelProvider;
 
     void revoke() {
         ++generation;
+        playback.reset();
         interest.reset();
         if (auto cancel = std::exchange(cancelProvider, {}))
             cancel();
@@ -50,7 +54,15 @@ struct ImvImage::State {
 ImvImage::ImvImage(QQuickItem *parent) : QQuickItem(parent), d(std::make_unique<State>()) {
     setFlag(ItemHasContents);
     connect(this, &QQuickItem::smoothChanged, this, [this] { update(); });
-    connect(this, &QQuickItem::windowChanged, this, [this] { polish(); });
+    connect(this, &QQuickItem::windowChanged, this, [this](QQuickWindow *window) {
+        QObject::disconnect(d->windowVisibility);
+        if (window)
+            d->windowVisibility =
+                connect(window, &QWindow::visibilityChanged, this, &ImvImage::syncPlayback);
+        syncPlayback();
+        polish();
+    });
+    connect(this, &QQuickItem::visibleChanged, this, &ImvImage::syncPlayback);
 }
 
 ImvImage::~ImvImage() { d->revoke(); }
@@ -117,14 +129,27 @@ void ImvImage::setRadius(qreal radius) {
 
 bool ImvImage::animate() const { return d->animate; }
 void ImvImage::setAnimate(bool animate) {
-    if (std::exchange(d->animate, animate) != animate)
+    if (std::exchange(d->animate, animate) != animate) {
+        if (d->playback && !animate)
+            d->playback->rewind();
+        syncPlayback();
         emit animateChanged();
+    }
 }
 
 bool ImvImage::playing() const { return d->playing; }
 void ImvImage::setPlaying(bool playing) {
-    if (std::exchange(d->playing, playing) != playing)
+    if (std::exchange(d->playing, playing) != playing) {
+        syncPlayback();
         emit playingChanged();
+    }
+}
+
+void ImvImage::syncPlayback() {
+    if (d->playback)
+        d->playback->run(d->status == Ready && d->animate && d->playing && isVisible() &&
+                         window() && window()->isVisible() &&
+                         window()->visibility() != QWindow::Minimized);
 }
 
 ImvImage::Status ImvImage::status() const { return d->status; }
@@ -138,6 +163,7 @@ void ImvImage::setOutcome(Status status, QString stage, QString code, QString de
     const bool errorChange =
         d->failure.stage != stage || d->failure.code != code || d->failure.detail != detail;
     d->failure = {std::move(stage), std::move(code), std::move(detail)};
+    syncPlayback();
     const auto generation = d->generation;
     QPointer guard(this);
     if (errorChange)
@@ -204,7 +230,8 @@ void ImvImage::updatePolish() {
         scale = DecodeSpec::Cover;
     else if (d->fill == Stretch)
         scale = DecodeSpec::Stretch;
-    const DecodeSpec spec{DecodeSpec::Pixels, bounds, scale};
+    const DecodeSpec spec{d->url.scheme() == "image" ? DecodeSpec::Pixels : DecodeSpec::Animation,
+                          bounds, scale};
     const auto generation = d->generation;
     const auto guard = QPointer(this);
     setOutcome(Loading);
@@ -216,6 +243,19 @@ void ImvImage::updatePolish() {
         auto &state = *self->d;
         state.asset = std::move(asset);
         state.assetGeneration = generation;
+        if (state.asset && (state.asset->stream || state.asset->animation.count)) {
+            state.playback = std::make_unique<Playback>(
+                state.asset, [self, generation](Asset frame, Failure failure) {
+                    if (!self || self->d->generation != generation)
+                        return;
+                    if (failure) {
+                        self->setOutcome(Failed, failure.stage, failure.code, failure.detail);
+                        return;
+                    }
+                    self->d->asset = std::move(frame);
+                    self->update();
+                });
+        }
         self->update();
         const auto info = state.asset ? asMap(state.asset->info) : QVariantMap{};
         const bool infoChange = info != state.info;

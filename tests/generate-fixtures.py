@@ -28,6 +28,13 @@ row = b'\0' + bytes.fromhex('ff0000ff') * (width // 2) + bytes.fromhex('00ff00ff
 (root / 'palette.png').write_bytes(png(width, height, row * height))
 for ext in ('jpg', 'gif', 'webp', 'tiff', 'heic', 'avif', 'jxl', 'ppm'):
     convert('palette.png', '-quality', '95', f'palette.{ext}')
+for ext in ('gif', 'webp'):
+    convert('-size', '64x32', '-delay', '20', 'xc:red', '-delay', '30', 'xc:lime',
+            '-delay', '45', 'xc:yellow', '-loop', '2', f'animation.{ext}')
+
+# 18 * 1024 * 1024 * 4 exceeds the decoded frame budget; the encoded GIF is small.
+colors = ['xc:red', 'xc:lime', 'xc:yellow']
+convert('-size', '1024x1024', '-delay', '25', *(colors * 6), '-loop', '0', 'stream.gif')
 (root / 'palette.svg').write_text('''<svg xmlns="http://www.w3.org/2000/svg" width="64" height="32">
 <rect width="32" height="32" fill="#ff0000"/><rect x="32" width="32" height="32" fill="#00ff00"/>
 </svg>''')

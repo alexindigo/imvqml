@@ -70,3 +70,20 @@ pressure and on release; active leases can temporarily exceed the 128 MiB
 target. Scene-graph invalidation drops the cache on the render thread. Item
 geometry, source rectangles and clip geometry are Qt scene-graph operations,
 not a custom GL renderer.
+
+## Animation
+
+The pipeline classifies timed sources before pixel submission: still decode
+uses the 8 s deadline and the animation decode uses 30 s. At most 64 MiB of
+packed display-size frames and delays are returned as one sealed mapping.
+Frame views share the mapping rather than copying the image stack. If the
+budget would be exceeded, the initial result carries only the first frame
+and the caller retains the opened input descriptor for playback.
+
+Each active stream has a separate one-slot playback pool. One request reads
+one composited source page using libvips' page selection. A two-frame lookahead
+ring is consumer-driven and streamed textures are not retained in the LRU.
+The decoder reparses the encoded source as needed; decoded pixels do not
+grow with the frame count. Timers own delay, loop and pause state; the item
+passes visibility and play intent. Paused streams retire their helper and
+lookahead after a grace period; they do not take still-pool capacity.

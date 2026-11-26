@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 #include "vips-decode.h"
+#include <QtEndian>
 
 #include <cerrno>
 #include <fcntl.h>
@@ -154,50 +155,91 @@ DecodeReport decodeWithVips(int input, int output, const DecodeSpec &spec) {
                                              ? "avif"
                                              : loader->format),
                      size, pages, loop};
+    int *delays = nullptr;
+    int delayCount = 0;
+    if (spec.mode != DecodeSpec::Pixels && pages > 1 && vips_image_get_typeof(raw, "delay") &&
+        !vips_image_get_array_int(raw, "delay", &delays, &delayCount) && delayCount == pages) {
+        if (spec.page >= pages)
+            return fail(DecodeCode::Decode, "Animation frame index is out of range");
+        report.delay = qMax(1, delays[spec.page]);
+    } else if (spec.mode == DecodeSpec::FrameAt) {
+        return fail(DecodeCode::Decode, "Source no longer has animation timing");
+    }
     if (spec.mode == DecodeSpec::Inspect)
         return report;
-
-    // Close the header pipeline before reloading at the requested size.
-    // The source is rewindable and nameless; discovery can only build one
-    // of the enabled _source operations. Only the first page is read here.
-    image.reset();
     auto target = spec.bounds;
     if (spec.scale == DecodeSpec::Cover) {
         target = target.scaled(size.boundedTo(target), Qt::KeepAspectRatio).expandedTo({1, 1});
     } else if (spec.scale == DecodeSpec::Stretch) {
         target = target.boundedTo(size);
     }
-    if (vips_source_rewind(source.get()) ||
-        vips_thumbnail_source(
-            source.get(), &raw, target.width(), "height", target.height(), "crop",
-            spec.scale == DecodeSpec::Cover ? VIPS_INTERESTING_CENTRE : VIPS_INTERESTING_NONE,
-            "size", spec.scale == DecodeSpec::Stretch ? VIPS_SIZE_FORCE : VIPS_SIZE_DOWN, "fail_on",
-            VIPS_FAIL_ON_ERROR, nullptr))
-        return fail(DecodeCode::Decode, "Could not thumbnail image", true);
-    image.reset(raw);
-    if (vips_colourspace(image.get(), &raw, VIPS_INTERPRETATION_sRGB, nullptr))
-        return fail(DecodeCode::Decode, "Could not normalize image color", true);
-    image.reset(raw);
-    if (!vips_image_hasalpha(raw)) {
-        if (vips_addalpha(image.get(), &raw, nullptr))
-            return fail(DecodeCode::Decode, "Could not add alpha channel", true);
-        image.reset(raw);
-    }
-    if (vips_image_get_bands(raw) != 4 || vips_image_get_format(raw) != VIPS_FORMAT_UCHAR)
-        return fail(DecodeCode::Decode, "Decoder did not produce an RGBA8 frame");
-    report.output = QSize(vips_image_get_width(raw), vips_image_get_height(raw));
+    const auto thumbnail = [&](int page) -> Image {
+        // Always request one composited page; never construct a full-height stack.
+        const auto options = page ? "page=" + QByteArray::number(page) + ",n=1" : QByteArray{};
+        if (vips_source_rewind(source.get()) ||
+            vips_thumbnail_source(
+                source.get(), &raw, target.width(), "height", target.height(), "crop",
+                spec.scale == DecodeSpec::Cover ? VIPS_INTERESTING_CENTRE : VIPS_INTERESTING_NONE,
+                "size", spec.scale == DecodeSpec::Stretch ? VIPS_SIZE_FORCE : VIPS_SIZE_DOWN,
+                "fail_on", VIPS_FAIL_ON_ERROR, "option-string", options.constData(), nullptr))
+            return {};
+        Image frame(raw);
+        if (vips_colourspace(frame.get(), &raw, VIPS_INTERPRETATION_sRGB, nullptr))
+            return {};
+        frame.reset(raw);
+        if (!vips_image_hasalpha(raw)) {
+            if (vips_addalpha(frame.get(), &raw, nullptr))
+                return {};
+            frame.reset(raw);
+        }
+        if (vips_image_get_bands(raw) != 4 || vips_image_get_format(raw) != VIPS_FORMAT_UCHAR)
+            return {};
+        return frame;
+    };
+    auto frame = thumbnail(spec.page);
+    if (!frame)
+        return fail(DecodeCode::Decode, "Could not thumbnail RGBA image", true);
+    const auto dimensions = [](const Image &value) {
+        return QSize(vips_image_get_width(value.get()), vips_image_get_height(value.get()));
+    };
+    report.output = dimensions(frame);
     const auto bytes = rgbaBytes(report.output);
     if (bytes <= 0 || report.output.width() > spec.bounds.width() ||
         report.output.height() > spec.bounds.height())
         return fail(DecodeCode::Output, "Output geometry is out of bounds");
-    size_t decoded = 0;
-    std::unique_ptr<void, decltype(&g_free)> pixels(
-        vips_image_write_to_memory(image.get(), &decoded), g_free);
-    if (!pixels || decoded != size_t(bytes))
-        return fail(DecodeCode::Decode, "Could not materialize RGBA pixels", true);
-    if (::ftruncate(output, bytes) ||
-        !writeAll(output, static_cast<const char *>(pixels.get()), bytes) ||
-        ::fcntl(output, F_ADD_SEALS, MemfdSeals) < 0)
+    if (spec.mode == DecodeSpec::Animation && report.delay) {
+        report.layout = DecodeReport::Batch;
+        if (report.outputBytes())
+            report.delay = 0;
+        else
+            report.layout = DecodeReport::Stream;
+    }
+    if (::ftruncate(output, report.outputBytes()))
+        return fail(DecodeCode::Output, "Could not size the output memfd");
+    const int count = report.layout == DecodeReport::Batch ? pages : 1;
+    for (int i = 0; i < count; ++i) {
+        if (i)
+            frame = thumbnail(i);
+        if (!frame || dimensions(frame) != report.output)
+            return fail(DecodeCode::Decode, "Inconsistent animation frame geometry", true);
+        size_t decoded = 0;
+        std::unique_ptr<void, decltype(&g_free)> pixels(
+            vips_image_write_to_memory(frame.get(), &decoded), g_free);
+        frame.reset();
+        if (!pixels || decoded != size_t(bytes))
+            return fail(DecodeCode::Decode, "Could not materialize RGBA pixels", true);
+        qint64 offset = 0;
+        if (count > 1) {
+            offset = i * (bytes + 4);
+            const auto delay = qToLittleEndian(qint32(qMax(1, delays[i])));
+            if (!writeAll(output, reinterpret_cast<const char *>(&delay), 4, offset))
+                return fail(DecodeCode::Output, "Could not write animation timing");
+            offset += 4;
+        }
+        if (!writeAll(output, static_cast<const char *>(pixels.get()), bytes, offset))
+            return fail(DecodeCode::Output, "Could not write RGBA pixels");
+    }
+    if (::fcntl(output, F_ADD_SEALS, MemfdSeals) < 0)
         return fail(DecodeCode::Output, "Could not write and seal the output memfd");
     return report;
 }

@@ -27,9 +27,14 @@ responses are supported. No new codec runs in the application for providers.
 The request size is the item size times the window DPR, rounded up. Per-edge
 resize jitter below the greater of 4 physical pixels and one eighth of the
 previous requested edge reuses the prior decode. Old pixels can stay visible
-during a resize but are dropped on source or fill-mode changes. The still
-lane uses the first frame; the `animate` and `playing` flags are consumed by
-the animation lane in unit 5.
+during a resize but are dropped on source or fill-mode changes.
+
+`animate` and `playing` default to true. Set `animate: false` for a first-frame
+view; set `playing: false` to pause at the current frame. Hiding the item or
+its window pauses playback and releases an idle streaming helper after 400 ms.
+Showing it again resumes at the playhead if `playing` is still true. Finite
+animations stop on the final frame. Multi-page images with no frame timing
+stay on their first page. Image jobs always select the first frame.
 
 ## Image jobs
 

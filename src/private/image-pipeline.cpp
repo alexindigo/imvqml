@@ -70,14 +70,27 @@ void ImagePipeline::pump() {
         const auto request = m_waiting.takeFirst().lock();
         if (!request || m_pending.value(request->key) != request)
             continue;
-        const auto ticket = submitDecode(m_pool, std::move(request->input), request->spec,
-                                         [self = QPointer(this), request](Decoded decoded) {
-                                             if (self)
-                                                 self->finish(request, std::move(decoded));
-                                         });
+        const bool classify = request->spec.mode == DecodeSpec::Animation && !request->classified;
+        const auto ticket = submitDecode(
+            m_pool, duplicateSource(request->input), classify ? DecodeSpec{} : request->spec,
+            [self = QPointer(this), request, classify](Decoded decoded) {
+                if (!self || self->m_pending.value(request->key) != request)
+                    return;
+                request->ticket = 0;
+                if (classify && !decoded.error) {
+                    request->classified = true;
+                    if (!decoded.delay)
+                        request->spec.mode = DecodeSpec::Pixels;
+                    self->m_waiting.append(request);
+                    self->pumpLater();
+                } else {
+                    self->finish(request, std::move(decoded));
+                }
+            });
         if (ticket.status == Pool::Admission::Accepted) {
             request->ticket = ticket.id;
-            ++m_submissions;
+            if (!classify)
+                ++m_submissions;
         } else {
             finish(request,
                    {{}, {}, {"admission", "output-failed", "Could not admit a display decode"}});
@@ -92,8 +105,13 @@ void ImagePipeline::finish(const std::shared_ptr<Pending> &request, Decoded deco
         return;
     m_pending.remove(request->key);
     Asset asset;
-    if (!decoded.error)
-        asset = exchangeAsset({request->key, std::move(decoded.source), std::move(decoded.pixels)});
+    if (!decoded.error) {
+        auto stream =
+            decoded.stream ? std::make_shared<const Fd>(std::move(request->input)) : nullptr;
+        asset = exchangeAsset({request->key, std::move(decoded.source), std::move(decoded.pixels),
+                               std::move(decoded.animation), std::move(stream), request->spec,
+                               decoded.delay});
+    }
     for (const auto &weak : std::as_const(request->listeners)) {
         if (const auto callback = weak.lock())
             (*callback)(asset, decoded.error);

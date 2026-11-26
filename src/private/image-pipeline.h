@@ -12,6 +12,11 @@ struct ImageAsset {
     QByteArray key;
     SourceInfo info;
     QImage pixels;
+    AnimationFrames animation;
+    std::shared_ptr<const Fd> stream;
+    DecodeSpec spec;
+    int delay = 0;
+    bool transient = false;
 };
 using Asset = std::shared_ptr<const ImageAsset>;
 
@@ -33,6 +38,7 @@ private:
         DecodeSpec spec;
         int ticket = 0;
         QList<std::weak_ptr<const Done>> listeners;
+        bool classified = false;
     };
     Interest interest(Done done, const std::shared_ptr<Pending> &pending = {});
     void finish(const std::shared_ptr<Pending> &pending, Decoded decoded);

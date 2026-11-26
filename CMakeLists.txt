@@ -42,7 +42,7 @@ qt_add_qml_module(imvqml URI ImvQml VERSION 1.0
     SOURCES src/include/imvqml/imvimagejob.h src/imvimagejob.cpp src/private/helper.cpp
         src/private/pool.cpp src/private/pool.h src/private/decode-client.cpp src/private/export.cpp
         src/include/imvqml/imvimage.h src/imvimage.cpp src/private/image-pipeline.cpp
-        src/private/image-node.cpp src/private/image-provider.cpp)
+        src/private/image-node.cpp src/private/image-provider.cpp src/private/playback.cpp)
 target_include_directories(imvqml PUBLIC
     "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/include>"
     "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"

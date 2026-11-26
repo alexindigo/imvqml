@@ -27,3 +27,6 @@
   creates the texture at scene-graph sync and signals invalidation on the
   render thread; no Qt private API or platform GL context is used. Verified
   with Qt 6.12's threaded OpenGL RHI in the guest niri session.
+- Animation uses the allowed libvips loaders' `delay` and `loop` metadata
+  and `page` selection for one composited frame. A source with pages but no
+  complete delay table remains a still. GIF and WebP were verified.

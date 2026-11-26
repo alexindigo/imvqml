@@ -34,6 +34,8 @@ public:
             return {};
         uploads.fetch_add(1, std::memory_order_relaxed);
         auto entry = std::make_shared<Entry>(Entry{asset, std::move(texture)});
+        if (asset->transient)
+            return entry;
         m_lru.push_front(entry);
         m_index.insert(asset->key, m_lru.begin());
         m_bytes += entry->bytes();

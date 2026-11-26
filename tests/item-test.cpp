@@ -13,6 +13,7 @@ class ItemTest : public QObject {
     Q_OBJECT
 private slots:
     void display();
+    void animation();
 };
 
 class TestProvider : public QQuickImageProvider {
@@ -122,6 +123,35 @@ Window {
     QCOMPARE(pixel(72, 16), QColor(Qt::red));
     QCOMPARE(Imv::imagePipeline().submissions(), beforeHit);
     QCOMPARE(Imv::textureUploads(), beforeReuse);
+}
+
+void ItemTest::animation() {
+    QQuickWindow window;
+    window.resize(320, 200);
+    Imv::ImvImage item(window.contentItem());
+    item.setSize({64, 32});
+    item.setPlaying(false);
+    item.setSource(QUrl::fromLocalFile(IMV_FIXTURES "/animation.gif"));
+    window.show();
+    QTRY_COMPARE(item.status(), Imv::ImvImage::Ready);
+    auto color = [&] {
+        const QImage frame = window.grabWindow();
+        return frame.isNull() ? QColor() : frame.pixelColor(16, 16);
+    };
+    QCOMPARE(color(), QColor(Qt::red));
+    QTest::qWait(350);
+    QCOMPARE(color(), QColor(Qt::red));
+    item.setPlaying(true);
+    item.setVisible(false);
+    QTest::qWait(450);
+    item.setVisible(true);
+    for (int cycle = 0; cycle < 2; ++cycle) {
+        QTRY_COMPARE_WITH_TIMEOUT(color(), QColor(Qt::red), 900);
+        QTRY_COMPARE_WITH_TIMEOUT(color(), QColor(Qt::green), 500);
+        QTRY_COMPARE_WITH_TIMEOUT(color(), QColor(Qt::yellow), 600);
+    }
+    QTest::qWait(900);
+    QCOMPARE(color(), QColor(Qt::yellow));
 }
 
 QTEST_MAIN(ItemTest)

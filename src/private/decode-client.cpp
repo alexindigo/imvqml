@@ -4,6 +4,7 @@
 #include <QCryptographicHash>
 #include <QFile>
 #include <QPointer>
+#include <QtEndian>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -14,15 +15,13 @@ OpenedSource fail(QString stage, QString code, QString detail) {
     return {{}, {}, {std::move(stage), std::move(code), std::move(detail)}};
 }
 
-struct Mapping {
-    void *start;
-    qint64 bytes;
-    static void release(void *data) {
-        auto *m = static_cast<Mapping *>(data);
-        ::munmap(m->start, m->bytes);
-        delete m;
-    }
-};
+using Mapping = std::shared_ptr<const uchar>;
+QImage imageView(const Mapping &mapping, QSize size, qint64 offset) {
+    return QImage(
+        mapping.get() + offset, size.width(), size.height(), size.width() * 4,
+        QImage::Format_RGBA8888, [](void *ptr) { delete static_cast<Mapping *>(ptr); },
+        new Mapping(mapping));
+}
 
 bool sealedOutput(int fd, qint64 bytes) {
     struct stat info{};
@@ -53,6 +52,20 @@ Failure translate(DecodeCode code, QString detail) {
     Q_UNREACHABLE();
 }
 } // namespace
+
+QImage AnimationFrames::frame(int index) const {
+    if (!mapping || index < 0 || index >= count)
+        return {};
+    return imageView(mapping, size, index * (rgbaBytes(size) + 4) + 4);
+}
+
+int AnimationFrames::delay(int index) const {
+    if (!mapping || index < 0 || index >= count)
+        return 0;
+    return qMax(1, qFromLittleEndian<qint32>(mapping.get() + index * (rgbaBytes(size) + 4)));
+}
+
+Fd duplicateSource(const Fd &fd) { return Fd(::fcntl(fd.get(), F_DUPFD_CLOEXEC, 0)); }
 
 QString localPath(const QUrl &url) {
     if (!url.isValid() || !url.host().isEmpty() || url.hasQuery() || url.hasFragment())
@@ -127,7 +140,7 @@ Pool::Ticket submitDecode(Pool &pool, Fd input, DecodeSpec spec,
     Frame frame{Kind::Request, 0, encode(spec), {}};
     frame.fds.emplace_back(std::move(input));
     auto output = std::make_shared<Fd>();
-    if (spec.mode == DecodeSpec::Pixels) {
+    if (spec.mode != DecodeSpec::Inspect) {
         *output = newMemfd("imvqml-pixels");
         if (!*output)
             return {Pool::Admission::Invalid};
@@ -137,7 +150,9 @@ Pool::Ticket submitDecode(Pool &pool, Fd input, DecodeSpec spec,
         frame.fds.emplace_back(std::move(sendFd));
     }
     return pool.submit(
-        std::move(frame), std::chrono::milliseconds(StillDeadlineMs),
+        std::move(frame),
+        std::chrono::milliseconds(spec.mode >= DecodeSpec::Animation ? AnimationDeadlineMs
+                                                                     : StillDeadlineMs),
         [done = std::move(done), output](JobReply reply) {
             if (reply.error) {
                 done({{}, {}, std::move(reply.error)});
@@ -152,20 +167,32 @@ Pool::Ticket submitDecode(Pool &pool, Fd input, DecodeSpec spec,
                 done({{}, {}, translate(report.code, std::move(report.detail))});
                 return;
             }
-            QImage image;
+            Decoded result{std::move(report.source),
+                           {},
+                           {},
+                           {},
+                           report.layout == DecodeReport::Stream,
+                           report.delay};
             if (*output) {
-                const auto bytes = rgbaBytes(report.output);
+                const auto frame = rgbaBytes(report.output);
+                const auto bytes = report.layout == DecodeReport::Batch
+                                       ? result.source.frames * (frame + 4)
+                                       : frame;
                 auto *pixels = ::mmap(nullptr, bytes, PROT_READ, MAP_SHARED, output->get(), 0);
                 if (pixels == MAP_FAILED) {
                     done({{}, {}, {"decode", "output-failed", "Could not map sealed pixels"}});
                     return;
                 }
-                image =
-                    QImage(static_cast<const uchar *>(pixels), report.output.width(),
-                           report.output.height(), report.output.width() * 4,
-                           QImage::Format_RGBA8888, Mapping::release, new Mapping{pixels, bytes});
+                Mapping mapping(static_cast<const uchar *>(pixels),
+                                [pixels, bytes](const uchar *) { ::munmap(pixels, bytes); });
+                if (report.layout == DecodeReport::Batch) {
+                    result.animation = {mapping, report.output, result.source.frames};
+                    result.pixels = result.animation.frame(0);
+                } else {
+                    result.pixels = imageView(mapping, report.output, 0);
+                }
             }
-            done({std::move(report.source), std::move(image), {}});
+            done(std::move(result));
         },
         [spec, output](const Frame &response) {
             DecodeReport report;
@@ -174,10 +201,15 @@ Pool::Ticket submitDecode(Pool &pool, Fd input, DecodeSpec spec,
             if (report.code != DecodeCode::Ok)
                 return true;
             if (spec.mode == DecodeSpec::Inspect)
-                return report.output == QSize(0, 0);
+                return report.layout == DecodeReport::Single && report.output == QSize(0, 0);
+            if (spec.mode != DecodeSpec::Animation && report.layout != DecodeReport::Single)
+                return false;
+            if (spec.mode == DecodeSpec::FrameAt &&
+                (!report.delay || spec.page >= report.source.frames))
+                return false;
             return report.output.width() <= spec.bounds.width() &&
                    report.output.height() <= spec.bounds.height() &&
-                   sealedOutput(output->get(), rgbaBytes(report.output));
+                   sealedOutput(output->get(), report.outputBytes());
         });
 }
 

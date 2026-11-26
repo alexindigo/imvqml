@@ -10,3 +10,4 @@
 | Persistent storage format | QOI, selected by timing before store implementation | [Measured comparison](tests/store-format.md), `imv-store-benchmark` |
 | `ImvImage` / private pipeline | Physical-size requests, owned sources, coalescing, cancellable interests and stale-delivery guards | `pipeline`: admitted cancellation and surviving shared interest; `items`: same-size coalescing, resize threshold, superseded source and provider/byte pixels |
 | Render-thread texture cache | Per-graph leases and byte-budgeted LRU | `items`: niri window pixels with one decode and one texture across two items, then reuse without a decode or texture creation |
+| Animation playback | Sealed small batches, dedicated streamed page helpers, bounded lookahead, delays, visibility and finite loops | `pipeline`: GIF/WebP delay metadata and pixels, large GIF ring, still availability and helper retirement/resume; `items`: two loops and paused/hidden window playback |

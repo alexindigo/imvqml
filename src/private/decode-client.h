@@ -13,16 +13,27 @@ struct OpenedSource {
     QByteArray identity;
     Failure error;
 };
+struct AnimationFrames {
+    std::shared_ptr<const uchar> mapping;
+    QSize size;
+    int count = 0;
+    QImage frame(int index) const;
+    int delay(int index) const;
+};
 struct Decoded {
     SourceInfo source;
     QImage pixels;
     Failure error;
+    AnimationFrames animation;
+    bool stream = false;
+    int delay = 0;
 };
 
 QString localPath(const QUrl &url);
 OpenedSource openSource(const QUrl &url);
 OpenedSource openSource(const QByteArray &bytes);
 Pool &decoderPool();
+Fd duplicateSource(const Fd &fd);
 Pool::Ticket submitDecode(Pool &pool, Fd input, DecodeSpec spec, std::function<void(Decoded)> done);
 QVariantMap asMap(const SourceInfo &source);
 QVariantMap asMap(const Failure &failure);

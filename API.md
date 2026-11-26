@@ -69,10 +69,10 @@ fetches network URLs. Uncompressed output edges must be 1 to 8192 pixels.
 | Method | Successful result |
 |---|---|
 | `inspect(source)` | `sourceInfo` with `format`, oriented `width` and `height`, `frames`, `loop` (0 means infinite) |
-| `sample(source, maxWidth, maxHeight)` | `sourceInfo`, fitted `width` and `height`, and owned packed unpremultiplied RGBA8 `rgba` (QML `ArrayBuffer`) |
-| `render(source, maxWidth, maxHeight, destination, format = "png")` | `sourceInfo`, fitted `width` and `height`, and a published local file; `format` is `png` or `webp` (lossless) |
+| `sample(source, maxWidth, maxHeight, videoPosition = 0)` | `sourceInfo`, fitted `width` and `height`, and owned packed unpremultiplied RGBA8 `rgba` (QML `ArrayBuffer`) |
+| `render(source, maxWidth, maxHeight, destination, format = "png", videoPosition = 0)` | `sourceInfo`, fitted `width` and `height`, and a published local file; `format` is `png` or `webp` (lossless) |
 
-Sample and render select the first frame and do not upscale. Render needs an
+Sample and render select the first image frame and do not upscale. Render needs an
 existing staging directory and an unused destination on a filesystem that
 supports same-directory hard links. It never replaces a name. `cancel(id)`
 returns false if the ticket is gone or atomic publication has begun; if it

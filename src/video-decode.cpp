@@ -37,7 +37,15 @@ const char *videoDemuxer(int input) {
 
 #ifdef IMV_HAVE_MPV_HEADERS
 struct MpvApi {
-    void *library = ::dlopen("libmpv.so.2", RTLD_NOW | RTLD_LOCAL);
+    static void *open() {
+        auto *library = ::dlopen("libmpv.so.2", RTLD_NOW | RTLD_LOCAL);
+#ifdef IMV_MPV_RUNTIME_HINT
+        if (!library)
+            library = ::dlopen(IMV_MPV_RUNTIME_HINT, RTLD_NOW | RTLD_LOCAL);
+#endif
+        return library;
+    }
+    void *library = open();
 #define IMV_MPV_SYMBOL(name) decltype(&::mpv_##name) name = symbol<decltype(name)>("mpv_" #name)
     IMV_MPV_SYMBOL(client_api_version);
     IMV_MPV_SYMBOL(create);

@@ -41,3 +41,6 @@
   complete delay table remains a still. GIF and WebP were verified.
 - Thumbnail export uses the freedesktop.org Thumbnail Managing Standard's
   URI-derived PNG filename, size buckets and required URI/mtime text fields.
+- The unlinked installed QML probes use Qt's public plugin discovery and
+  Quick window readback. bubblewrap hides both original trees during the
+  external build and run; this is test infrastructure, not a product sandbox.

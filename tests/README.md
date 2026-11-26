@@ -13,11 +13,12 @@ cmake --build build --parallel 4
 env -u DISPLAY -u WAYLAND_DISPLAY ctest --test-dir build --output-on-failure -LE wayland
 ```
 
-`installed-prefix` builds external C++ and QML consumers against a moved
-install prefix. Bubblewrap overlays both original trees with empty read-only
-directories; the QML consumer checks the relocated paths in `/proc/self/maps`.
-`installed-sample` asserts the two expected RGBA pixels under the same
-isolation. `jobs` uses generated fixture files and no display.
+`installed-prefix`, `installed-sample` and `installed-wayland` build external
+consumers against a moved install prefix. Bubblewrap overlays both original
+trees with empty read-only directories. The probes check the relocated
+paths in `/proc/self/maps` and exact decoded or rendered pixels. The QML
+consumers link Qt only, not imvqml. `package-metadata` checks the local CPack
+archive inventory. `jobs` uses generated fixture files and no display.
 `pipeline` proves that dropping a listener after admission does not deliver a
 stale outcome or cancel another listener's still-active request.
 
@@ -28,6 +29,11 @@ reads back its rendered pixels for fill, masks, resize and source changes.
 Private counters prove decode and texture sharing and reuse.
 The same two lanes check exact GIF/WebP frame delays, elapsed playback and
 finite loops, and dedicated playback-helper pause/resume with a large GIF.
+
+When mpv headers and its runtime DSO are both installed, the video tests
+also need FFmpeg with libvpx and libx264 encoders. They generate their own
+seek and rotation fixtures; two isolated tests inject a native abort and
+hide the actual runtime library, respectively.
 
 To rerun the persistent-format measurement inside the guest niri session,
 use `QT_QPA_PLATFORM=wayland build/tests/imv-store-benchmark` with the

@@ -30,13 +30,18 @@ endfunction()
 run("${CMAKE_COMMAND}" --install "${build}" --prefix "${work}/first-prefix")
 file(RENAME "${work}/first-prefix" "${prefix}")
 
-set(denied "@BWRAP@" --die-with-parent --ro-bind / / --proc /proc --dev /dev
+set(denied "@BWRAP@" --die-with-parent --unshare-net --ro-bind / / --proc /proc --dev-bind /dev /dev
     --ro-bind "${work}/empty" "${source}" --ro-bind "${work}/empty" "${build}"
     --bind "${work}" "${work}" --chdir "${work}"
     --unsetenv LD_LIBRARY_PATH --unsetenv QML_IMPORT_PATH --unsetenv QML2_IMPORT_PATH
-    --unsetenv DISPLAY --unsetenv WAYLAND_DISPLAY --setenv TMPDIR "${work}")
-run(${denied} "${CMAKE_COMMAND}" -S consumer -B consumer-build "-DCMAKE_PREFIX_PATH=${prefix}")
-run(${denied} "${CMAKE_COMMAND}" --build consumer-build --parallel 2)
-run(${denied} "${work}/consumer-build/imv-installed-cpp")
-run(${denied} "${work}/consumer-build/imv-installed-qml" "${prefix}/@qml_dir@" "${prefix}" "${PIXELS}")
+    --unsetenv DISPLAY --setenv TMPDIR "${work}")
+set(headless ${denied} --unsetenv WAYLAND_DISPLAY)
+run(${headless} "${CMAKE_COMMAND}" -S consumer -B consumer-build "-DCMAKE_PREFIX_PATH=${prefix}")
+run(${headless} "${CMAKE_COMMAND}" --build consumer-build --parallel 2)
+run(${headless} "${work}/consumer-build/imv-installed-cpp" "${prefix}" "${work}/cpp.svg")
+run(${headless} "${work}/consumer-build/imv-installed-qml" "${prefix}/@qml_dir@" "${prefix}" "${PIXELS}")
+if(WAYLAND)
+    run(${denied} --setenv QT_QPA_PLATFORM wayland "${work}/consumer-build/imv-installed-wayland" "${prefix}/@qml_dir@"
+        "${prefix}" "${work}/palette.svg")
+endif()
 file(REMOVE_RECURSE "${work}")

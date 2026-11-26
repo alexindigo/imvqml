@@ -34,6 +34,7 @@ target_link_libraries(imv-wire PUBLIC Qt6::Core)
 set_target_properties(imv-wire PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 option(IMV_ENABLE_VIDEO "Build the optional runtime libmpv adapter when headers are available" ON)
+set(IMV_MPV_RUNTIME_HINT "" CACHE FILEPATH "Optional explicit libmpv location for non-FHS packages")
 find_path(IMV_MPV_HEADERS mpv/render.h)
 add_executable(imvqml-decoder src/decoder.cpp src/vips-decode.cpp src/video-decode.cpp)
 target_compile_definitions(imvqml-decoder PRIVATE QT_NO_KEYWORDS)
@@ -41,6 +42,9 @@ target_link_libraries(imvqml-decoder PRIVATE imv-wire PkgConfig::VIPS Qt6::Gui $
 if(IMV_ENABLE_VIDEO AND IMV_MPV_HEADERS)
     target_include_directories(imvqml-decoder PRIVATE "${IMV_MPV_HEADERS}")
     target_compile_definitions(imvqml-decoder PRIVATE IMV_HAVE_MPV_HEADERS)
+    if(IMV_MPV_RUNTIME_HINT)
+        target_compile_definitions(imvqml-decoder PRIVATE IMV_MPV_RUNTIME_HINT="${IMV_MPV_RUNTIME_HINT}")
+    endif()
 endif()
 set_target_properties(imvqml-decoder PROPERTIES RUNTIME_OUTPUT_DIRECTORY
     "${stage}/${CMAKE_INSTALL_LIBEXECDIR}")
@@ -90,3 +94,8 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/imvqmlConfig.cmake"
 if(BUILD_TESTING)
     add_subdirectory(tests)
 endif()
+
+set(CPACK_GENERATOR TGZ)
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Qt Quick image pipeline and isolated decoder for Linux")
+set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
+include(CPack)

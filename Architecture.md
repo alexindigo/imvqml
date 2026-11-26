@@ -115,3 +115,10 @@ The software renderer sees unrotated input; the helper uses source metadata
 to orient pixels before publishing the same sealed RGBA result as stills.
 The application does not link libmpv or mpvqml. The helper-pool deadline and
 crash boundary also apply to native initialization and teardown.
+
+## Installation boundary
+
+The QML module, backing library, CMake target and decoder install together.
+Independent probes rebuild against the moved prefix with both original trees
+overlaid by empty directories. They verify relocated ELF mappings and pixels
+from headless C++ and QML jobs and a Wayland QML item.

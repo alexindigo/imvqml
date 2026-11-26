@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: LGPL-3.0-only
+#include "probe.h"
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
@@ -67,21 +68,7 @@ int main(int argc, char **argv) {
         qCritical().noquote() << component.errorString();
         return 4;
     }
-    QFile mappings("/proc/self/maps");
-    if (!mappings.open(QIODevice::ReadOnly))
-        return 5;
-    // Read line by line: proc pseudo-files advertise a size of zero.
-    bool library = false, plugin = false;
-    for (;;) {
-        const auto line = mappings.readLine();
-        if (line.isEmpty())
-            break;
-        if (!line.contains(prefix + '/'))
-            continue;
-        library |= line.contains("/libimvqml.so.0.1.0");
-        plugin |= line.contains("/libimvqmlplugin.so");
-    }
-    if (!library || !plugin) {
+    if (!mappedFrom(prefix, true)) {
         qCritical("QML did not map the relocated plugin and backing library");
         return 6;
     }

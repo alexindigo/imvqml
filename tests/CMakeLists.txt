@@ -83,4 +83,10 @@ target_link_libraries(imv-store-benchmark PRIVATE Qt6::Gui PkgConfig::WEBP PkgCo
 configure_file(relocate.cmake.in relocate.cmake @ONLY)
 add_test(NAME installed-prefix COMMAND "${CMAKE_COMMAND}" -P relocate.cmake)
 add_test(NAME installed-sample COMMAND "${CMAKE_COMMAND}" -DPIXELS=ON -P relocate.cmake)
+add_test(NAME installed-wayland COMMAND "${CMAKE_COMMAND}" -DWAYLAND=ON -P relocate.cmake)
 set_tests_properties(installed-prefix installed-sample PROPERTIES TIMEOUT 90)
+set_tests_properties(installed-wayland PROPERTIES TIMEOUT 90 LABELS wayland)
+
+configure_file(package.cmake.in package.cmake @ONLY)
+add_test(NAME package-metadata COMMAND "${CMAKE_COMMAND}" -P package.cmake)
+set_tests_properties(package-metadata PROPERTIES TIMEOUT 90)

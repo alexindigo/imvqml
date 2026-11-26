@@ -7,7 +7,8 @@
 namespace Imv {
 
 QSGNode *updateImageNode(QSGNode *node, QQuickWindow *window, const Asset &asset, QSizeF size,
-                         ImvImage::FillMode fill, ImvImage::Mask mask, qreal radius, bool smooth);
+                         ImvImage::FillMode fill, ImvImage::Mask mask, qreal radius,
+                         const QColor &tint, bool smooth);
 quint64 textureUploads();
 
 } // namespace Imv

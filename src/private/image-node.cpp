@@ -39,19 +39,22 @@ struct Presentation {
     ImvImage::FillMode fill;
     ImvImage::Mask mask;
     qreal radius;
+    QRgb tint;
     bool smooth;
+
+    bool needsRaster() const { return mask != ImvImage::NoMask || tint != 0; }
 
     QByteArray key(const Asset &asset) const {
         QByteArray bytes;
         QDataStream key(&bytes, QIODeviceBase::WriteOnly);
-        key << asset->key << quint8(mask);
-        if (mask != ImvImage::NoMask)
+        key << asset->key << quint8(mask) << quint32(tint);
+        if (needsRaster())
             key << size << raster << quint8(fill) << radius << smooth;
         return bytes;
     }
 
     QImage image(const QImage &pixels) const {
-        if (mask == ImvImage::NoMask)
+        if (!needsRaster())
             return pixels;
         if (!rgbaBytes(raster))
             return {};
@@ -65,6 +68,15 @@ struct Presentation {
         const auto placement = layoutImage(size, pixels.size(), fill);
         painter.drawImage(placement.target, pixels, placement.source);
         const QRectF box(QPointF{}, size);
+        if (tint) {
+            // Opaque tint replaces RGB while preserving the fitted image's alpha.
+            painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
+            painter.fillRect(box, QColor::fromRgb(tint));
+        }
+        if (mask == ImvImage::NoMask) {
+            painter.end();
+            return result;
+        }
         QPainterPath outside;
         outside.addRect(box);
         if (mask == ImvImage::Circle) {
@@ -189,7 +201,7 @@ public:
     void layout(const Presentation &presentation) {
         const auto pixels = QSizeF(m_lease->size);
         const auto placement =
-            presentation.mask == ImvImage::NoMask
+            !presentation.needsRaster()
                 ? layoutImage(presentation.size, pixels, presentation.fill)
                 : Layout{QRectF(QPointF{}, presentation.size), QRectF(QPointF{}, pixels)};
         m_image->setRect(placement.target);
@@ -205,20 +217,24 @@ private:
 } // namespace
 
 QSGNode *updateImageNode(QSGNode *old, QQuickWindow *window, const Asset &asset, QSizeF size,
-                         ImvImage::FillMode fill, ImvImage::Mask mask, qreal radius, bool smooth) {
+                         ImvImage::FillMode fill, ImvImage::Mask mask, qreal radius,
+                         const QColor &tint, bool smooth) {
     auto node = std::unique_ptr<ImageNode>(static_cast<ImageNode *>(old));
     if (!asset || size.isEmpty())
         return nullptr;
     const auto limit = qMin(size.width(), size.height()) / 2;
     radius = mask == ImvImage::Circle ? limit : qMin(radius, limit);
-    if (radius <= 0)
+    if (mask == ImvImage::NoMask || radius <= 0) {
         mask = ImvImage::NoMask;
+        radius = 0;
+    }
     const auto dpr = window->effectiveDevicePixelRatio();
     const auto edge = [dpr](qreal logical) {
         return qCeil(qMin(qreal(MaxEdge + 1), logical * dpr));
     };
+    const QRgb tintRgb = tint.isValid() && tint.alphaF() > 0 ? tint.rgb() : 0;
     const Presentation presentation{
-        size, QSize(edge(size.width()), edge(size.height())), fill, mask, radius, smooth};
+        size, QSize(edge(size.width()), edge(size.height())), fill, mask, radius, tintRgb, smooth};
     if (!node)
         node = std::make_unique<ImageNode>(forGraph(window));
     if (!node->sync(window, asset, presentation))

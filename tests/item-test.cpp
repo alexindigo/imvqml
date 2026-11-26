@@ -21,6 +21,7 @@ private slots:
     void transientProviderJob();
     void transientAsyncProviderJob();
     void masks();
+    void alphaTint();
     void animation();
     void cachePolicy();
 };
@@ -350,6 +351,53 @@ void ItemTest::masks() {
     QCOMPARE(circle + '|' + rounded, clipped + '|' + clipped);
     item.setRadius(0);
     QTRY_COMPARE(sample(), square);
+}
+
+void ItemTest::alphaTint() {
+    QQuickWindow window;
+    window.resize(96, 64);
+    window.setColor(Qt::black);
+    Imv::ImvImage item(window.contentItem());
+    item.setSize({96, 64});
+    item.setFillMode(Imv::ImvImage::Stretch);
+    item.setSmooth(false);
+    QImage source(96, 64, QImage::Format_RGBA8888);
+    source.fill(Qt::red);
+    for (int y = 0; y < source.height(); ++y) {
+        for (int x = 32; x < source.width(); ++x)
+            source.setPixelColor(x, y, QColor(255, 0, 0, x < 64 ? 128 : 0));
+    }
+    QBuffer encoded;
+    QVERIFY(encoded.open(QIODevice::WriteOnly));
+    QVERIFY(source.save(&encoded, "PNG"));
+    item.setBytes(encoded.data());
+    window.show();
+    QTRY_COMPARE(item.status(), Imv::ImvImage::Ready);
+    const auto sample = [&] {
+        const auto frame = window.grabWindow();
+        if (frame.isNull())
+            return QString("no frame");
+        const auto dpr = frame.devicePixelRatio();
+        const auto at = [&](int x) { return frame.pixelColor(qRound(x * dpr), qRound(32 * dpr)); };
+        return QString("%1 %2 %3").arg(at(16).name(), at(48).name(), at(80).name());
+    };
+    const QString untinted("#ff0000 #800000 #000000");
+    QTRY_COMPARE(sample(), untinted);
+    const auto decodes = Imv::imagePipeline().submissions();
+    const auto uploads = Imv::textureUploads();
+    item.setProperty("tint", QColor(0, 255, 0, 128));
+    QTRY_COMPARE_WITH_TIMEOUT(sample(), QString("#00ff00 #008000 #000000"), 1500);
+    QVERIFY(item.setProperty("tint", QColor(Qt::blue)));
+    QTRY_COMPARE_WITH_TIMEOUT(sample(), QString("#0000ff #000080 #000000"), 1500);
+    QVERIFY(item.setProperty("tint", QColor(Qt::green)));
+    QTRY_COMPARE_WITH_TIMEOUT(sample(), QString("#00ff00 #008000 #000000"), 1500);
+    QCOMPARE(Imv::textureUploads(), uploads + 2);
+    QVERIFY(item.setProperty("tint", QColor(Qt::transparent)));
+    QTRY_COMPARE_WITH_TIMEOUT(sample(), untinted, 1500);
+    QCOMPARE(Imv::textureUploads(), uploads + 2);
+    QCOMPARE(Imv::imagePipeline().submissions(), decodes);
+    QCOMPARE(item.status(), Imv::ImvImage::Ready);
+    qInfo() << "graphics API" << window.rendererInterface()->graphicsApi();
 }
 
 void ItemTest::animation() {

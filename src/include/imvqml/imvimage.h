@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 #pragma once
 
+#include <QColor>
 #include <QQuickItem>
 #include <QUrl>
 #include <QVariantMap>
@@ -16,6 +17,7 @@ class ImvImage : public QQuickItem {
     Q_PROPERTY(FillMode fillMode READ fillMode WRITE setFillMode NOTIFY fillModeChanged FINAL)
     Q_PROPERTY(Mask mask READ mask WRITE setMask NOTIFY maskChanged FINAL)
     Q_PROPERTY(qreal radius READ radius WRITE setRadius NOTIFY radiusChanged FINAL)
+    Q_PROPERTY(QColor tint READ tint WRITE setTint NOTIFY tintChanged FINAL)
     Q_PROPERTY(bool animate READ animate WRITE setAnimate NOTIFY animateChanged FINAL)
     Q_PROPERTY(bool playing READ playing WRITE setPlaying NOTIFY playingChanged FINAL)
     Q_PROPERTY(double videoPosition READ videoPosition WRITE setVideoPosition NOTIFY
@@ -46,6 +48,8 @@ public:
     void setMask(Mask mask);
     qreal radius() const;
     void setRadius(qreal radius);
+    QColor tint() const;
+    void setTint(const QColor &color);
     bool animate() const;
     void setAnimate(bool animate);
     bool playing() const;
@@ -63,6 +67,7 @@ signals:
     void fillModeChanged();
     void maskChanged();
     void radiusChanged();
+    void tintChanged();
     void animateChanged();
     void playingChanged();
     void videoPositionChanged();

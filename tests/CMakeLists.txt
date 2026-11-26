@@ -75,8 +75,8 @@ target_compile_definitions(imv-item-test PRIVATE IMV_FIXTURES="${fixtures}"
 add_dependencies(imv-item-test imvqmlplugin imvqml-decoder)
 add_test(NAME items COMMAND imv-item-test)
 set_tests_properties(items PROPERTIES FIXTURES_REQUIRED images LABELS wayland TIMEOUT 40)
-add_test(NAME masks-software COMMAND imv-item-test masks)
-set_tests_properties(masks-software PROPERTIES ENVIRONMENT "QT_QUICK_BACKEND=software"
+add_test(NAME presentation-software COMMAND imv-item-test masks alphaTint)
+set_tests_properties(presentation-software PROPERTIES ENVIRONMENT "QT_QUICK_BACKEND=software"
     LABELS wayland TIMEOUT 20)
 
 pkg_check_modules(ZSTD REQUIRED IMPORTED_TARGET libzstd)

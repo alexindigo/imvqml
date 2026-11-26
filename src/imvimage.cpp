@@ -30,6 +30,7 @@ struct ImvImage::State {
     FillMode fill = Contain;
     Mask mask = NoMask;
     qreal radius = 0;
+    QColor tint = Qt::transparent;
     bool animate = true;
     bool playing = true;
     double videoPosition = 0;
@@ -162,6 +163,15 @@ void ImvImage::setRadius(qreal radius) {
     d->radius = radius;
     update();
     emit radiusChanged();
+}
+
+QColor ImvImage::tint() const { return d->tint; }
+void ImvImage::setTint(const QColor &color) {
+    if (d->tint == color)
+        return;
+    d->tint = color;
+    update();
+    emit tintChanged();
 }
 
 bool ImvImage::animate() const { return d->animate; }
@@ -333,8 +343,8 @@ void ImvImage::updatePolish() {
 
 QSGNode *ImvImage::updatePaintNode(QSGNode *old, UpdatePaintNodeData *) {
     const auto asset = d->asset;
-    QSGNode *node =
-        updateImageNode(old, window(), asset, size(), d->fill, d->mask, d->radius, smooth());
+    QSGNode *node = updateImageNode(old, window(), asset, size(), d->fill, d->mask, d->radius,
+                                    d->tint, smooth());
     if (asset && !size().isEmpty() && d->reported != d->generation &&
         d->assetGeneration == d->generation) {
         d->reported = d->generation;

@@ -72,9 +72,11 @@ hold texture leases; texture entries hold the decoded asset for reuse. One
 texture is shared across matching presentations. Masks are antialiased alpha
 variants generated at the texture boundary, so they work with software and
 GPU renderers without requiring separate decodes or disk entries. The texture
-key includes the active mask, radius, fill, output geometry, and sampling mode
-for masked presentations. Eviction is least-recently-used among unleased
-entries, trimmed at cache pressure and on release; active leases can temporarily
+key includes the active mask, radius, tint, fill, output geometry, and sampling
+mode for derived presentations. Tint replaces RGB at that same texture boundary
+and never changes the raw decoded or persistently cached pixels. Eviction is
+least-recently-used among unleased entries, trimmed at cache pressure and on
+release; active leases can temporarily
 exceed the 128 MiB target. Scene-graph invalidation drops the cache on the
 render thread.
 

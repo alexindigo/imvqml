@@ -22,6 +22,7 @@ application for providers.
 |---|---|
 | `fillMode` | `ImvImage.Contain` (default), `Cover` (center crop), or `Stretch` |
 | `mask`, `radius` | `NoMask` (default), `Circle` (inscribed), or `Rounded` with a radius in logical pixels |
+| `tint` | Replaces the displayed RGB with this color and preserves the source alpha. `"transparent"` (default) disables tint. |
 | `smooth` | Inherited Qt Quick texture filtering, true by default |
 | `status` | `Idle` for no source, `Loading` awaiting size/decode/texture, `Ready` after scene-graph texture creation, or `Failed` |
 | `sourceInfo` | `format`, oriented `width` and `height`, `frames`, `loop`; empty before an accepted result |
@@ -31,6 +32,10 @@ Circle and rounded masks use antialiased pixel alpha in both the default and
 software Qt Quick renderers. The circle is centered and inscribed in the item;
 a rounded mask with radius zero is rectangular. Masking affects display only,
 not the pixels returned or exported by a job.
+
+Tint works the same way on both renderers. A tint with nonzero alpha supplies
+RGB only; it does not change image opacity. Changing tint redraws the item
+without decoding again or changing the pixels stored in the disk cache.
 
 The request size is the item size times the window DPR, rounded up. Per-edge
 resize jitter below the greater of 4 physical pixels and one eighth of the

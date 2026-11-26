@@ -115,8 +115,8 @@ private slots:
         store.lookup(input('a'), spec, [&](ImageStore::Lookup r) { a = std::move(r); });
         store.lookup(input('b'), spec, [&](ImageStore::Lookup r) { b = std::move(r); });
         QTRY_VERIFY(a.lease && b.lease);
-        store.publish(a, input('a'), value);
-        store.publish(b, input('b'), value);
+        store.publish(a, value);
+        store.publish(b, value);
         QTRY_VERIFY(QFileInfo::exists(a.path) && QFileInfo::exists(b.path));
 
         QLockFile other(QDir(directory.path()).filePath(".imvqml.lock"));
@@ -159,7 +159,7 @@ private slots:
         store.lookup(input('a'), spec,
                      [&](ImageStore::Lookup result) { first = std::move(result); });
         QTRY_VERIFY(first.lease);
-        store.publish(first, input('a'), value);
+        store.publish(first, value);
         QTRY_COMPARE(files().size(), 1);
         // Make the budget exactly one encoded entry rather than assuming its
         // compressed length. Both writes encode the same image.
@@ -167,14 +167,14 @@ private slots:
         store.lookup(input('b'), spec,
                      [&](ImageStore::Lookup result) { second = std::move(result); });
         QTRY_VERIFY(second.lease);
-        store.publish(second, input('b'), value);
+        store.publish(second, value);
         bool checked = false;
         store.lookup(input('b'), spec, [&](ImageStore::Lookup result) { checked = !result.value; });
         QTRY_VERIFY(checked);
         QVERIFY(QFileInfo::exists(first.path));
         const auto previous = first.path;
         first = {};
-        store.publish(second, input('b'), value);
+        store.publish(second, value);
         QTRY_VERIFY(QFileInfo::exists(second.path));
         QVERIFY(!QFileInfo::exists(previous));
     }

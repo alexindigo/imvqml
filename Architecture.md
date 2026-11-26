@@ -32,9 +32,9 @@ kill, but a detached retirement receiver owns the process until Qt reaps it.
 Only the decoder helper runs libvips. At startup it blocks libvips-marked
 untrusted operations and all foreign loaders. One table in `vips-decode.cpp`
 then enables only the `_source` loaders it uses: PNG, JPEG, GIF (nsgif),
-WebP, TIFF, SVG, HEIF/AVIF, JPEG XL. It accepts no media paths; a nameless,
-seekable source reads only the passed descriptor, capped at the admitted
-length (256 MiB maximum). Unknown and non-allow-listed formats converge on
+WebP, TIFF, SVG, HEIF/AVIF, JPEG XL. It accepts no media paths. Both backends
+receive only a nameless, seekable, sealed snapshot at most 256 MiB long.
+The helper validates this contract before selecting a backend. Unknown and non-allow-listed formats converge on
 `inspect/unsupported-format`. This is crash containment, not a general OS
 sandbox. Body/schema validation remains separate from the loader policy.
 
@@ -57,8 +57,8 @@ single cancellation/publication gate precedes `linkat` no-clobber commit.
 ## Display
 
 `ImvImage` adapts sources and snapshots physical bounds and fill intent. The
-GUI-affine pipeline keys requests by opened descriptor identity (file stat
-tuple or digest of immutable owned bytes) and the encoded decode spec. It
+GUI-affine pipeline keys requests by source revision (file stat including
+ctime, or digest of immutable owned bytes) and the encoded decode spec. It
 coalesces waiting and submitted decodes, queues behind pool capacity, and
 revokes delivery interest independently of helper retirement. A generation
 guards decode and texture outcomes at the item. The pipeline's result index
@@ -104,7 +104,8 @@ lookahead after a grace period; they do not take still-pool capacity.
 ## Persistent store
 
 One serial store worker owns content hashing, QOI envelope validation,
-publication and eviction. Keys pair SHA-256 of the opened content with
+publication and eviction. Keys pair SHA-256 of the same immutable snapshot
+used to classify and decode the request with
 decode parameters and the imvqml build version, libvips version and loader
 implementation fingerprint. The key also includes the system SDK libvips
 file identity so upgrading that library breaks reuse across installs. An

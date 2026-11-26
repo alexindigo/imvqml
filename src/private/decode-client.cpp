@@ -5,9 +5,11 @@
 #include <QFile>
 #include <QPointer>
 #include <QtEndian>
+#include <cerrno>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 namespace Imv {
 namespace {
@@ -110,8 +112,30 @@ OpenedSource openSource(const QUrl &url) {
     const auto number = [](auto value) { return QByteArray::number(value); };
     auto identity = "file/" + number(info.st_dev) + '/' + number(info.st_ino) + '/' +
                     number(info.st_size) + '/' + number(info.st_mtim.tv_sec) + '/' +
-                    number(info.st_mtim.tv_nsec);
-    return {std::move(fd), std::move(identity), {}};
+                    number(info.st_mtim.tv_nsec) + '/' + number(info.st_ctim.tv_sec) + '/' +
+                    number(info.st_ctim.tv_nsec);
+    auto snapshot = newMemfd("imvqml-file-source");
+    if (!snapshot)
+        return fail("open", "unreadable", "Could not create a source snapshot");
+    char block[64 * 1024];
+    for (qint64 position = 0; position < info.st_size;) {
+        const auto count =
+            ::pread(fd.get(), block, qMin<qint64>(sizeof block, info.st_size - position), position);
+        if (count < 0 && errno == EINTR)
+            continue;
+        if (count <= 0 || !writeAll(snapshot.get(), block, count, position))
+            return fail("open", "unreadable", "Could not read the opened source revision");
+        position += count;
+    }
+    struct stat after{};
+    if (::fstat(fd.get(), &after) || info.st_size != after.st_size ||
+        info.st_mtim.tv_sec != after.st_mtim.tv_sec ||
+        info.st_mtim.tv_nsec != after.st_mtim.tv_nsec ||
+        info.st_ctim.tv_sec != after.st_ctim.tv_sec ||
+        info.st_ctim.tv_nsec != after.st_ctim.tv_nsec ||
+        ::fcntl(snapshot.get(), F_ADD_SEALS, MemfdSeals) < 0)
+        return fail("open", "unreadable", "Could not seal an unchanged source revision");
+    return {std::move(snapshot), std::move(identity), {}, info};
 }
 
 OpenedSource openSource(const QByteArray &bytes) {

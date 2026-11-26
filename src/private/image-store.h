@@ -21,12 +21,12 @@ public:
     ~ImageStore() override;
     void configure(QString directory, qint64 budget, bool enabled);
     void lookup(Fd input, DecodeSpec spec, std::function<void(Lookup)> done);
-    void publish(Lookup lookup, Fd input, Decoded decoded);
+    void publish(Lookup lookup, Decoded decoded);
     void clear();
     void invalidate(Fd input);
     bool enabled() const { return m_enabled; }
     quint64 epoch() const { return m_epoch; }
-    void thumbnail(QString path, Fd input, QImage pixels, SourceInfo info, int size,
+    void thumbnail(QString path, struct stat revision, QImage pixels, SourceInfo info, int size,
                    std::function<void(Failure, QUrl)> done);
 
 private:

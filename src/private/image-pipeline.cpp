@@ -124,7 +124,7 @@ void ImagePipeline::finish(const std::shared_ptr<Pending> &request, Decoded deco
         return;
     m_pending.remove(request->key);
     if (!hit && request->cached.lease)
-        imageStore().publish(request->cached, duplicateSource(request->input), decoded);
+        imageStore().publish(request->cached, decoded);
     Asset asset;
     if (!decoded.error) {
         auto stream =

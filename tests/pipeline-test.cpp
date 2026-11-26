@@ -4,6 +4,7 @@
 #include <QtTest>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 using namespace Imv;
 
@@ -35,9 +36,66 @@ public:
     int seals = -1;
 };
 
+class ReportChild : public Child {
+public:
+    enum Fault { None, ExtraFd, Malformed, Unsealed, Short };
+    explicit ReportChild(Fault fault) : fault(fault) {}
+    void start() override {}
+    void terminate() override { reportExit(); }
+    Io send(const Frame &request) override {
+        const int fd = request.fds.at(1).get();
+        const auto report = DecodeReport{DecodeCode::Ok, {"png", {8, 4}}, {8, 4}};
+        if (fault != Unsealed && !sealPixelOutput(fd, report.outputBytes() - (fault == Short)))
+            return Io::Error;
+        next = {Kind::Reply, request.serial, fault == Malformed ? "invalid" : encode(report), {}};
+        if (fault == ExtraFd)
+            next.fds.push_back(newMemfd("rejected"));
+        emit readable();
+        return Io::Ok;
+    }
+    Io receive(Frame &reply) override {
+        reply = std::exchange(next, {});
+        return Io::Ok;
+    }
+
+private:
+    Fault fault;
+    Frame next;
+};
+
 class PipelineTest : public QObject {
     Q_OBJECT
 private slots:
+    void immutableRevision() {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const auto path = dir.filePath("mutable");
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::ReadWrite));
+        QCOMPARE(file.write("before"), 6);
+        QVERIFY(file.flush());
+        struct stat original{};
+        QCOMPARE(::fstat(file.handle(), &original), 0);
+        const auto url = QUrl::fromLocalFile(path);
+        auto first = openSource(url);
+        QVERIFY(first.fd);
+        QTest::qWait(20);
+        QVERIFY(file.seek(0));
+        QCOMPARE(file.write("rewrit"), 6);
+        QVERIFY(file.flush());
+        const timespec times[]{{0, UTIME_OMIT}, original.st_mtim};
+        QCOMPARE(::futimens(file.handle(), times), 0);
+        auto second = openSource(url);
+        QVERIFY(second.fd);
+        char buffer[6];
+        QCOMPARE(::pread(first.fd.get(), buffer, sizeof buffer, 0), 6);
+        QCOMPARE(QByteArray(buffer, 6), "before");
+        QCOMPARE(::fcntl(first.fd.get(), F_GET_SEALS) & MemfdSeals, MemfdSeals);
+        QVERIFY(first.identity != second.identity);
+        QCOMPARE(::pread(second.fd.get(), buffer, sizeof buffer, 0), 6);
+        QCOMPARE(QByteArray(buffer, 6), "rewrit");
+    }
+
     void boundedOutput() {
         PixelChild *child = nullptr;
         Pool pool(
@@ -61,6 +119,43 @@ private slots:
             QCOMPARE(child->length, mode == DecodeSpec::Animation ? AnimationBudget : 8 * 4 * 4);
             QCOMPARE(child->seals, F_SEAL_GROW);
         }
+    }
+
+    void malformedOutput_data() {
+        QTest::addColumn<int>("fault");
+        QTest::newRow("extra-fd") << int(ReportChild::ExtraFd);
+        QTest::newRow("malformed-report") << int(ReportChild::Malformed);
+        QTest::newRow("missing-seals") << int(ReportChild::Unsealed);
+        QTest::newRow("wrong-size") << int(ReportChild::Short);
+    }
+
+    void malformedOutput() {
+        QFETCH(int, fault);
+        int launches = 0;
+        Pool pool(
+            [&] {
+                return std::make_unique<ReportChild>(launches++ ? ReportChild::None
+                                                                : ReportChild::Fault(fault));
+            },
+            1, 32);
+        QSignalSpy releases(&pool, &Pool::capacityReleased);
+        QList<Decoded> results;
+        const auto submit = [&] {
+            return submitDecode(pool, openSource(QByteArray("test")).fd,
+                                {DecodeSpec::Pixels, {8, 4}},
+                                [&](Decoded image) { results.append(std::move(image)); });
+        };
+        QCOMPARE(submit().status, Pool::Admission::Accepted);
+        QTRY_COMPARE(releases.size(), 1);
+        QCOMPARE(results.size(), 1);
+        QCOMPARE(results[0].error.stage, "helper");
+        QCOMPARE(results[0].error.code, "protocol-error");
+        QCOMPARE(submit().status, Pool::Admission::Accepted);
+        QTRY_COMPARE(releases.size(), 2);
+        QCOMPARE(results.size(), 2);
+        QVERIFY(!results[1].error);
+        QCOMPARE(results[1].pixels.size(), QSize(8, 4));
+        QCOMPARE(launches, 2);
     }
 
     void animationLayouts() {

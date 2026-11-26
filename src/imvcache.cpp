@@ -104,18 +104,20 @@ int ImvCache::exportThumbnail(const QUrl &source, int size) {
     }
     path = QDir::cleanPath(QDir::current().absoluteFilePath(path));
     auto input = openSource(QUrl::fromLocalFile(path));
-    auto fd = std::make_shared<Fd>(duplicateSource(input.fd));
+    const auto revision = input.file;
     d->exports.insert(
         id, imagePipeline().request(
                 std::move(input), {DecodeSpec::Pixels, {size, size}},
-                [self = QPointer(this), id, path, fd, size](Asset asset, Failure error) {
+                [self = QPointer(this), id, path, revision, size](Asset asset, Failure error) {
                     if (!self)
                         return;
-                    if (error) {
-                        self->finish(id, asMap(error));
+                    if (error || !revision) {
+                        self->finish(id, asMap(error ? error
+                                                     : Failure{"open", "unreadable",
+                                                               "Missing source revision"}));
                         return;
                     }
-                    imageStore().thumbnail(path, std::move(*fd), asset->pixels, asset->info, size,
+                    imageStore().thumbnail(path, *revision, asset->pixels, asset->info, size,
                                            [self, id](Failure failure, QUrl output) {
                                                if (!self)
                                                    return;

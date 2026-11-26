@@ -104,16 +104,11 @@ bool initializeVips(const char *program) {
     return true;
 }
 
-DecodeReport decodeWithVips(int input, int output, const DecodeSpec &spec) {
-    struct stat stat{};
-    if (::fstat(input, &stat) != 0 || !S_ISREG(stat.st_mode))
-        return fail(DecodeCode::Unreadable, "Input descriptor is not a readable regular file");
-    if (stat.st_size > MaxSourceBytes)
-        return fail(DecodeCode::SourceLimit, "Source exceeds 256 MiB");
-    if (stat.st_size <= 0)
+DecodeReport decodeWithVips(int input, int output, const DecodeSpec &spec, qint64 length) {
+    if (length <= 0)
         return fail(DecodeCode::InvalidHeader, "Empty source");
 
-    ReadCap cap{input, stat.st_size};
+    ReadCap cap{input, length};
     auto *custom = vips_source_custom_new();
     Source source(VIPS_SOURCE(custom));
     g_signal_connect(custom, "read", G_CALLBACK(ReadCap::read), &cap);

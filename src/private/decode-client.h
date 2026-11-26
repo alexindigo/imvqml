@@ -6,12 +6,15 @@
 #include <QImage>
 #include <QUrl>
 #include <QVariantMap>
+#include <optional>
+#include <sys/stat.h>
 
 namespace Imv {
 struct OpenedSource {
     Fd fd;
     QByteArray identity;
     Failure error;
+    std::optional<struct stat> file;
 };
 struct AnimationFrames {
     std::shared_ptr<const uchar> mapping;

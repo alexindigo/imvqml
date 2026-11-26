@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: LGPL-3.0-only
+#include "decode-wire.h"
 #include "helper.h"
 #include "wire.h"
 
@@ -90,6 +91,81 @@ private slots:
         b = {};
         QCOMPARE(transport.receive(frame), Io::Closed);
         QCOMPARE(transport.send({Kind::Probe, 1, {}, {}}), Io::Closed);
+    }
+
+    void helperSourceContract() {
+        QProcess process;
+        auto transport = std::make_unique<SeqPacket>(startChild(process, decoderPath()));
+        QVERIFY(process.waitForStarted(2000));
+        const QByteArray svg = "<svg xmlns='http://www.w3.org/2000/svg' width='8' height='8'/>";
+        const auto inspect = [&](quint64 serial, Fd source, DecodeCode expected) {
+            Frame request{Kind::Request, serial, encode(DecodeSpec{}), {}};
+            request.fds.push_back(std::move(source));
+            QCOMPARE(transport->send(request), Io::Ok);
+            Frame reply;
+            Io status = Io::Again;
+            QTRY_VERIFY(status != Io::Again || (status = transport->receive(reply)) != Io::Again);
+            QCOMPARE(status, Io::Ok);
+            QCOMPARE(reply.serial, serial);
+            DecodeReport report;
+            QVERIFY(decode(reply.body, report));
+            QCOMPARE(report.code, expected);
+        };
+        auto mutableInput = newMemfd("mutable-source");
+        QVERIFY(writeAll(mutableInput.get(), svg.constData(), svg.size()));
+        inspect(1, std::move(mutableInput), DecodeCode::Unreadable);
+        auto sealed = newMemfd("oversized-source");
+        QCOMPARE(::ftruncate(sealed.get(), MaxSourceBytes + 1), 0);
+        QCOMPARE(::fcntl(sealed.get(), F_ADD_SEALS, MemfdSeals), 0);
+        inspect(2, std::move(sealed), DecodeCode::SourceLimit);
+        auto bounded = newMemfd("bounded-source");
+        QVERIFY(writeAll(bounded.get(), svg.constData(), svg.size()));
+        QCOMPARE(::fcntl(bounded.get(), F_ADD_SEALS, MemfdSeals), 0);
+        inspect(3, std::move(bounded), DecodeCode::Ok);
+        transport.reset();
+        QVERIFY(process.waitForFinished(2000));
+    }
+
+    void ancillaryRejection_data() {
+        QTest::addColumn<int>("count");
+        QTest::newRow("too-many") << 3;
+        QTest::newRow("truncated") << 8;
+    }
+
+    void ancillaryRejection() {
+        QFETCH(int, count);
+        auto [a, b] = socketPair();
+        SeqPacket transport(std::move(a));
+        Fd source(::open("/dev/null", O_RDONLY | O_CLOEXEC));
+        QVERIFY(source);
+        const auto openCount = [] {
+            return QDir("/proc/self/fd").entryList(QDir::AllEntries | QDir::NoDotAndDotDot).size();
+        };
+        const auto before = openCount();
+        auto [encoded, drain] = socketPair();
+        SeqPacket encoder(std::move(encoded));
+        QCOMPARE(encoder.send({Kind::Probe, 1, {}, {}}), Io::Ok);
+        char body[64];
+        const auto length = ::recv(drain.get(), body, sizeof body, 0);
+        QVERIFY(length > 0);
+        struct iovec data{body, size_t(length)};
+        alignas(struct cmsghdr) char control[CMSG_SPACE(8 * sizeof(int))]{};
+        struct msghdr message{};
+        message.msg_iov = &data;
+        message.msg_iovlen = 1;
+        message.msg_control = control;
+        message.msg_controllen = CMSG_SPACE(count * sizeof(int));
+        auto *header = CMSG_FIRSTHDR(&message);
+        header->cmsg_level = SOL_SOCKET;
+        header->cmsg_type = SCM_RIGHTS;
+        header->cmsg_len = CMSG_LEN(count * sizeof(int));
+        auto *fds = reinterpret_cast<int *>(CMSG_DATA(header));
+        std::fill_n(fds, count, source.get());
+        QCOMPARE(::sendmsg(b.get(), &message, MSG_NOSIGNAL), length);
+        Frame frame;
+        QCOMPARE(transport.receive(frame), Io::Protocol);
+        QVERIFY(frame.fds.empty());
+        QCOMPARE(openCount(), before + 2);
     }
 };
 

@@ -170,7 +170,10 @@ void ImageStore::lookup(Fd input, DecodeSpec spec, std::function<void(Lookup)> d
             Lookup result;
             result.epoch = epoch;
             if (d->enabled && d->epoch == epoch && privateDirectory(d->directory)) {
-                result.fingerprint = digest(input);
+                // Only immutable decode inputs may create a publishable lookup.
+                const int seals = ::fcntl(input.get(), F_GET_SEALS);
+                if (seals >= 0 && (seals & MemfdSeals) == MemfdSeals)
+                    result.fingerprint = digest(input);
                 if (!result.fingerprint.isEmpty()) {
                     auto version =
                         d->version + libraryStamp(IMV_VIPS_PATH) + libraryStamp(IMV_MPV_PATH);
@@ -216,28 +219,27 @@ void ImageStore::lookup(Fd input, DecodeSpec spec, std::function<void(Lookup)> d
         });
 }
 
-void ImageStore::publish(Lookup lookup, Fd input, Decoded decoded) {
+void ImageStore::publish(Lookup lookup, Decoded decoded) {
     if (!m_enabled || lookup.path.isEmpty() || lookup.epoch != m_epoch)
         return;
-    m_worker.start(
-        [this, lookup = std::move(lookup), input = std::move(input), decoded = std::move(decoded)] {
-            if (lookup.epoch != d->epoch || digest(input) != lookup.fingerprint)
-                return;
-            const auto data = encodeEntry(decoded, d->budget);
-            if (data.isEmpty())
-                return;
-            QLockFile lock(QDir(d->directory).filePath(".imvqml.lock"));
-            if (!lock.tryLock(0))
-                return;
-            d->flushInvalidations();
-            if (d->invalidated(lookup.fingerprint) || !d->makeSpace(data.size(), lookup.path))
-                return;
-            QSaveFile file(lookup.path);
-            if (file.open(QIODevice::WriteOnly) &&
-                file.setPermissions(QFile::ReadOwner | QFile::WriteOwner) &&
-                file.write(data) == data.size())
-                file.commit();
-        });
+    m_worker.start([this, lookup = std::move(lookup), decoded = std::move(decoded)] {
+        if (lookup.epoch != d->epoch)
+            return;
+        const auto data = encodeEntry(decoded, d->budget);
+        if (data.isEmpty())
+            return;
+        QLockFile lock(QDir(d->directory).filePath(".imvqml.lock"));
+        if (!lock.tryLock(0))
+            return;
+        d->flushInvalidations();
+        if (d->invalidated(lookup.fingerprint) || !d->makeSpace(data.size(), lookup.path))
+            return;
+        QSaveFile file(lookup.path);
+        if (file.open(QIODevice::WriteOnly) &&
+            file.setPermissions(QFile::ReadOwner | QFile::WriteOwner) &&
+            file.write(data) == data.size())
+            file.commit();
+    });
 }
 
 void ImageStore::clear() { invalidate({}); }
@@ -280,15 +282,14 @@ QString thumbnailBucket(int size) {
     }
 }
 
-void ImageStore::thumbnail(QString path, Fd input, QImage pixels, SourceInfo info, int size,
-                           std::function<void(Failure, QUrl)> done) {
-    m_worker.start([this, path = std::move(path), input = std::move(input),
-                    pixels = std::move(pixels), info = std::move(info), size,
-                    done = std::move(done)]() mutable {
+void ImageStore::thumbnail(QString path, struct stat before, QImage pixels, SourceInfo info,
+                           int size, std::function<void(Failure, QUrl)> done) {
+    m_worker.start([this, path = std::move(path), before, pixels = std::move(pixels),
+                    info = std::move(info), size, done = std::move(done)]() mutable {
         const auto produce = [&]() -> QUrl {
-            struct stat before{}, current{};
+            struct stat current{};
             const auto directoryKey = thumbnailBucket(size);
-            if (directoryKey.isEmpty() || ::fstat(input.get(), &before) || pixels.isNull())
+            if (directoryKey.isEmpty() || pixels.isNull())
                 return {};
             auto base = qEnvironmentVariable("XDG_CACHE_HOME");
             if (!QDir::isAbsolutePath(base))

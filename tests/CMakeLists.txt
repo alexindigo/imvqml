@@ -48,6 +48,7 @@ add_test(NAME video-without-mpv COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT
 set_tests_properties(videos video-native-fault video-native-watchdog video-without-mpv PROPERTIES FIXTURES_REQUIRED videos TIMEOUT 35)
 endif()
 add_executable(imv-job-test job-test.cpp)
+target_include_directories(imv-job-test PRIVATE ${PROJECT_SOURCE_DIR}/src/private)
 target_link_libraries(imv-job-test PRIVATE imvqml Qt6::Test Qt6::Gui)
 target_compile_definitions(imv-job-test PRIVATE IMV_FIXTURES="${fixtures}")
 add_dependencies(imv-job-test imvqml-decoder)

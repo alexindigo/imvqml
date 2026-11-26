@@ -1,14 +1,33 @@
 // SPDX-License-Identifier: LGPL-3.0-only
+#include "export.h"
 #include <imvqml/imvimagejob.h>
 
 #include <QFile>
 #include <QImage>
+#include <QScopeGuard>
+#include <QSemaphore>
 #include <QTemporaryDir>
+#include <QThreadPool>
 #include <QtTest>
 #include <limits>
 
 namespace {
 using Imv::ImvImageJob;
+
+struct ExportGate {
+    Imv::Publication phase;
+    QSemaphore entered, resume;
+    QString path;
+};
+ExportGate *exportGate = nullptr;
+
+void observeStage(Imv::Publication phase, const QString &path) {
+    if (phase != exportGate->phase)
+        return;
+    exportGate->path = path;
+    exportGate->entered.release();
+    exportGate->resume.acquire();
+}
 
 QUrl fixture(QString name) { return QUrl::fromLocalFile(QStringLiteral(IMV_FIXTURES "/") + name); }
 
@@ -130,6 +149,69 @@ private slots:
         }
         const auto failure = result(spy, job.sample(fixture("palette.png"), 0, 20));
         QCOMPARE(failure.value("code").toString(), "invalid-size");
+    }
+
+    void exportRace_data() {
+        QTest::addColumn<QString>("scenario");
+        for (const auto &scenario : {"cancel", "publish", "destroy", "identity"})
+            QTest::newRow(scenario) << QString(scenario);
+    }
+
+    void exportRace() {
+        QFETCH(QString, scenario);
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        auto job = std::make_unique<ImvImageJob>();
+        QSignalSpy spy(job.get(), &ImvImageJob::finished);
+        ExportGate gate{scenario == "publish" ? Imv::Publication::Publishing
+                                              : Imv::Publication::Staging};
+        exportGate = &gate;
+        Imv::observeExports(observeStage);
+        const auto cleanup = qScopeGuard([&] {
+            gate.resume.release();
+            QThreadPool::globalInstance()->waitForDone();
+            Imv::observeExports(nullptr);
+            exportGate = nullptr;
+        });
+        const auto dest = dir.filePath("out.png");
+        const int id = job->render(fixture("palette.png"), 20, 12, QUrl::fromLocalFile(dest));
+        QVERIFY(id > 0);
+        QTRY_VERIFY_WITH_TIMEOUT(gate.entered.available(), 3500);
+        gate.entered.acquire();
+        if (scenario == "cancel") {
+            QVERIFY(job->cancel(id));
+        } else if (scenario == "publish") {
+            QVERIFY(!job->cancel(id));
+        } else if (scenario == "destroy") {
+            job.reset();
+        } else {
+            QVERIFY(QFile::rename(gate.path, gate.path + ".original"));
+            QFile substitute(gate.path);
+            QVERIFY(substitute.open(QIODevice::WriteOnly));
+            QCOMPARE(substitute.write("not an image"), 12);
+        }
+        gate.resume.release();
+        QVERIFY(QThreadPool::globalInstance()->waitForDone(4000));
+        if (scenario == "destroy") {
+            QCoreApplication::processEvents();
+            QVERIFY(spy.isEmpty());
+        } else {
+            const auto value = result(spy, id);
+            QCOMPARE(value.value("code").toString(),
+                     scenario == "cancel" ? QString("cancelled") : QString());
+            QCoreApplication::processEvents();
+            QVERIFY(spy.isEmpty());
+        }
+        if (scenario == "publish" || scenario == "identity") {
+            const QImage image(dest);
+            QCOMPARE(image.size(), QSize(20, 10));
+            QVERIFY(image.pixelColor(3, 4).red() > 215);
+            QVERIFY(QFile::remove(dest));
+        }
+        QCOMPARE(QDir(dir.path())
+                     .entryList(QDir::AllEntries | QDir::Hidden | QDir::NoDotAndDotDot)
+                     .size(),
+                 0);
     }
 
     void publication() {

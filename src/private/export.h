@@ -6,6 +6,8 @@
 
 namespace Imv {
 enum class Publication { Staging, Cancelled, Publishing };
+using ExportObserver = void (*)(Publication, const QString &);
+void observeExports(ExportObserver observer);
 Failure stageImage(const QString &destination, const QString &format, const QImage &image,
                    std::atomic<Publication> &phase);
 } // namespace Imv

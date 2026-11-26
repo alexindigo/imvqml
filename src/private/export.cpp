@@ -1,12 +1,19 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 #include "export.h"
-#include <QTemporaryFile>
+#include <QFile>
+#include <QTemporaryDir>
 #include <cerrno>
 #include <fcntl.h>
 #include <unistd.h>
 #include <webp/encode.h>
 
 namespace Imv {
+namespace {
+std::atomic<ExportObserver> exportObserver;
+}
+
+void observeExports(ExportObserver observer) { exportObserver.store(observer); }
+
 Failure stageImage(const QString &destination, const QString &format, const QImage &image,
                    std::atomic<Publication> &phase) {
     auto failure = [](QString code, QString detail) {
@@ -20,8 +27,12 @@ Failure stageImage(const QString &destination, const QString &format, const QIma
     Fd directory(::open(parent.constData(), O_PATH | O_DIRECTORY | O_CLOEXEC));
     if (!directory)
         return failure("write-failed", "Cannot open staging directory");
-    QTemporaryFile staged(QStringLiteral("/proc/self/fd/%1/.imvqml-XXXXXX").arg(directory.get()));
-    if (!staged.open())
+    QTemporaryDir workspace(QStringLiteral("/proc/self/fd/%1/.imvqml-XXXXXX").arg(directory.get()));
+    if (!workspace.isValid())
+        return failure("write-failed", workspace.errorString());
+    QFile staged(workspace.filePath("pixels"));
+    if (!staged.open(QIODevice::NewOnly | QIODevice::WriteOnly,
+                     QFileDevice::ReadOwner | QFileDevice::WriteOwner))
         return failure("write-failed", staged.errorString());
     if (format == "png") {
         if (!image.save(&staged, "PNG"))
@@ -36,14 +47,17 @@ Failure stageImage(const QString &destination, const QString &format, const QIma
     }
     if (!staged.flush())
         return failure("write-failed", staged.errorString());
-    const auto tempPath = staged.fileName();
-    const auto temp = QFile::encodeName(tempPath.mid(tempPath.lastIndexOf('/') + 1));
-    if (temp.isEmpty())
-        return failure("write-failed", "Cannot name staged image");
+    const auto descriptor = "/proc/self/fd/" + QByteArray::number(staged.handle());
+    const auto observe = exportObserver.load();
+    if (observe)
+        observe(Publication::Staging, staged.fileName());
     auto expected = Publication::Staging;
     if (!phase.compare_exchange_strong(expected, Publication::Publishing))
         return {};
-    if (::linkat(directory.get(), temp.constData(), directory.get(), filename.constData(), 0) < 0) {
+    if (observe)
+        observe(Publication::Publishing, staged.fileName());
+    if (::linkat(AT_FDCWD, descriptor.constData(), directory.get(), filename.constData(),
+                 AT_SYMLINK_FOLLOW) < 0) {
         if (errno == EEXIST)
             return failure("already-exists", "Destination already exists");
         return failure("write-failed", "Cannot publish staged image");

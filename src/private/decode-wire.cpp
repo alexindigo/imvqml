@@ -115,6 +115,25 @@ Fd newMemfd(const char *name) {
     return Fd(::memfd_create(name, MFD_CLOEXEC | MFD_ALLOW_SEALING));
 }
 
+Fd newPixelOutput(const DecodeSpec &spec) {
+    if (!spec.valid() || spec.mode == DecodeSpec::Inspect)
+        return {};
+    auto fd = newMemfd("imvqml-pixels");
+    const auto frame = rgbaBytes(spec.bounds);
+    // An animation may return a batch or one full-size streamed frame.
+    // ftruncate reserves logical size, not physical pages.
+    const auto capacity = spec.mode == DecodeSpec::Animation ? qMax(frame, AnimationBudget) : frame;
+    if (!fd || ::ftruncate(fd.get(), capacity) || ::fcntl(fd.get(), F_ADD_SEALS, F_SEAL_GROW) < 0)
+        return {};
+    return fd;
+}
+
+bool sealPixelOutput(int fd, qint64 bytes) {
+    const auto seals = ::fcntl(fd, F_GET_SEALS);
+    return bytes > 0 && seals >= 0 && (seals & F_SEAL_GROW) && !::ftruncate(fd, bytes) &&
+           ::fcntl(fd, F_ADD_SEALS, MemfdSeals) >= 0;
+}
+
 bool writeAll(int fd, const char *data, qint64 size, qint64 offset) {
     qint64 position = 0;
     while (position < size) {

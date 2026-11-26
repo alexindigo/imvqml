@@ -2,12 +2,67 @@
 #include "image-pipeline.h"
 #include "playback.h"
 #include <QtTest>
+#include <fcntl.h>
+#include <sys/stat.h>
 
 using namespace Imv;
+
+class PixelChild : public Child {
+public:
+    void start() override {}
+    void terminate() override { reportExit(); }
+    Io send(const Frame &frame) override {
+        serial = frame.serial;
+        count = frame.fds.size();
+        if (count == 2) {
+            const auto fd = frame.fds[1].get();
+            struct stat info{};
+            if (::fstat(fd, &info) != 0)
+                return Io::Error;
+            length = info.st_size;
+            seals = ::fcntl(fd, F_GET_SEALS);
+        }
+        emit readable();
+        return Io::Ok;
+    }
+    Io receive(Frame &frame) override {
+        frame = {Kind::Reply, serial, encode(DecodeReport{DecodeCode::Unsupported}), {}};
+        return Io::Ok;
+    }
+    quint64 serial = 0;
+    std::size_t count = 0;
+    qint64 length = -1;
+    int seals = -1;
+};
 
 class PipelineTest : public QObject {
     Q_OBJECT
 private slots:
+    void boundedOutput() {
+        PixelChild *child = nullptr;
+        Pool pool(
+            [&] {
+                auto process = std::make_unique<PixelChild>();
+                child = process.get();
+                return process;
+            },
+            1, 32);
+        int completed = 0;
+        for (const auto mode : {DecodeSpec::Inspect, DecodeSpec::Pixels, DecodeSpec::Animation,
+                                DecodeSpec::FrameAt}) {
+            const DecodeSpec spec{mode, mode == DecodeSpec::Inspect ? QSize(0, 0) : QSize(8, 4)};
+            const auto ticket = submitDecode(pool, openSource(QByteArray("test")).fd, spec,
+                                             [&](Decoded) { ++completed; });
+            QCOMPARE(ticket.status, Pool::Admission::Accepted);
+            QTRY_COMPARE(completed, int(mode) + 1);
+            QCOMPARE(child->count, mode == DecodeSpec::Inspect ? 1u : 2u);
+            if (mode == DecodeSpec::Inspect)
+                continue;
+            QCOMPARE(child->length, mode == DecodeSpec::Animation ? AnimationBudget : 8 * 4 * 4);
+            QCOMPARE(child->seals, F_SEAL_GROW);
+        }
+    }
+
     void animationLayouts() {
         Pool pool;
         ImagePipeline pipeline(pool);

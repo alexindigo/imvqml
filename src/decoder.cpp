@@ -33,6 +33,10 @@ int main(int, char **argv) {
             if (result.code == Imv::DecodeCode::Unsupported)
                 if (auto video = Imv::decodeVideo(input, output, spec))
                     result = std::move(*video);
+            if (output >= 0 && result.code == Imv::DecodeCode::Ok &&
+                !Imv::sealPixelOutput(output, result.outputBytes())) {
+                result = {Imv::DecodeCode::Output, {}, {0, 0}, "Could not seal the output memfd"};
+            }
             frame.fds.clear();
             frame.body = Imv::encode(result);
             frame.kind = Imv::Kind::Reply;

@@ -141,10 +141,10 @@ Pool::Ticket submitDecode(Pool &pool, Fd input, DecodeSpec spec,
     frame.fds.emplace_back(std::move(input));
     auto output = std::make_shared<Fd>();
     if (spec.mode != DecodeSpec::Inspect) {
-        *output = newMemfd("imvqml-pixels");
+        *output = newPixelOutput(spec);
         if (!*output)
             return {Pool::Admission::Invalid};
-        Fd sendFd(::fcntl(output->get(), F_DUPFD_CLOEXEC, 0));
+        auto sendFd = duplicateSource(*output);
         if (!sendFd)
             return {Pool::Admission::Invalid};
         frame.fds.emplace_back(std::move(sendFd));
@@ -174,10 +174,7 @@ Pool::Ticket submitDecode(Pool &pool, Fd input, DecodeSpec spec,
                            report.layout == DecodeReport::Stream,
                            report.delay};
             if (*output) {
-                const auto frame = rgbaBytes(report.output);
-                const auto bytes = report.layout == DecodeReport::Batch
-                                       ? result.source.frames * (frame + 4)
-                                       : frame;
+                const auto bytes = report.outputBytes();
                 auto *pixels = ::mmap(nullptr, bytes, PROT_READ, MAP_SHARED, output->get(), 0);
                 if (pixels == MAP_FAILED) {
                     done({{}, {}, {"decode", "output-failed", "Could not map sealed pixels"}});

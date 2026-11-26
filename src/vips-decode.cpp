@@ -214,8 +214,6 @@ DecodeReport decodeWithVips(int input, int output, const DecodeSpec &spec) {
         else
             report.layout = DecodeReport::Stream;
     }
-    if (::ftruncate(output, report.outputBytes()))
-        return fail(DecodeCode::Output, "Could not size the output memfd");
     const int count = report.layout == DecodeReport::Batch ? pages : 1;
     for (int i = 0; i < count; ++i) {
         if (i)
@@ -239,8 +237,6 @@ DecodeReport decodeWithVips(int input, int output, const DecodeSpec &spec) {
         if (!writeAll(output, static_cast<const char *>(pixels.get()), bytes, offset))
             return fail(DecodeCode::Output, "Could not write RGBA pixels");
     }
-    if (::fcntl(output, F_ADD_SEALS, MemfdSeals) < 0)
-        return fail(DecodeCode::Output, "Could not write and seal the output memfd");
     return report;
 }
 

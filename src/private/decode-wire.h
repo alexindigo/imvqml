@@ -59,6 +59,8 @@ bool decode(QByteArrayView bytes, DecodeSpec &spec);
 bool decode(QByteArrayView bytes, DecodeReport &report);
 qint64 rgbaBytes(QSize size);
 Fd newMemfd(const char *name);
+Fd newPixelOutput(const DecodeSpec &spec);
+bool sealPixelOutput(int fd, qint64 bytes);
 bool writeAll(int fd, const char *data, qint64 size, qint64 offset = 0);
 
 } // namespace Imv

@@ -40,10 +40,12 @@ sandbox. Body/schema validation remains separate from the loader policy.
 
 Read header dimensions and verify the source's 64 MiPixel limit before
 thumbnailing. libvips handles shrink-on-load when the loader supports it,
-applies orientation and emits fitted sRGB RGBA8. The client passes an empty
-sealable output descriptor, and the helper seals it against all writes and
-size changes after producing pixels. A typed reply is accepted only when
-its geometry and the sealed descriptor size agree. A read-only mapping
+applies orientation and emits fitted sRGB RGBA8. For pixel requests the client
+passes a sparse output descriptor sized to the request's maximum and sealed
+against growth. The helper shrinks it to the actual output size and applies
+the remaining seals before a successful reply. Inspect has no output descriptor.
+A pixel reply is accepted only when its geometry, all seals and the exact
+descriptor size agree. A read-only mapping
 backs the owned frame value; the caller does not decode a PNG or WebP.
 The pool's still deadline is 8 seconds and helper address space is 1 GiB.
 

@@ -285,10 +285,8 @@ std::optional<DecodeReport> decodeVideo(int input, int output, const DecodeSpec 
     }
     report.output = image.size();
     const auto bytes = rgbaBytes(report.output);
-    if (!bytes || ::ftruncate(output, bytes) ||
-        !writeAll(output, reinterpret_cast<const char *>(image.constBits()), bytes) ||
-        ::fcntl(output, F_ADD_SEALS, MemfdSeals) < 0)
-        return fail(DecodeCode::Output, "Could not publish the sealed video frame");
+    if (!bytes || !writeAll(output, reinterpret_cast<const char *>(image.constBits()), bytes))
+        return fail(DecodeCode::Output, "Could not write video frame");
     return report;
 #endif
 }

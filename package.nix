@@ -19,7 +19,7 @@ let
 in
 stdenv.mkDerivation {
   pname = "imvqml";
-  version = "0.1.1";
+  version = "0.1.2";
   src = lib.cleanSource ./.;
   nativeBuildInputs = [ cmake ninja pkg-config ];
   buildInputs = [ qt6.qtbase qt6.qtdeclarative vips libwebp ];

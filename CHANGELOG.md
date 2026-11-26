@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.2] - 2026-11-26
+
+### Fix
+
+`ImvImageJob` captures transient provider pixels and owns file or data inputs
+without waiting for helper capacity. Explicit jobs return a cancellable
+ticket and use the shared admission queue; only a full queue returns `-2`
+without capturing the input. Thumbnail exports open the source at call time
+and never publish against a replaced file.
+
+- Queue explicit image jobs and capture inputs at call time (`a6b7727`, merged in `bc711eb`).
+
 ## [0.1.1] - 2026-11-26
 
 ### Fix

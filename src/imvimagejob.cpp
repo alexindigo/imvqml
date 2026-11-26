@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 #include "imvimagejob.h"
-#include "private/decode-client.h"
 #include "private/export.h"
-#include "private/image-provider.h"
+#include "private/image-pipeline.h"
 
 #include <QDir>
 #include <QHash>
@@ -13,20 +12,6 @@
 #include <mutex>
 
 namespace Imv {
-namespace {
-// A job holds its share through delivery, including provider and export work.
-constexpr int MaxJobs = 2;
-std::atomic<int> activeJobs;
-std::shared_ptr<void> reserveJob() {
-    int used = activeJobs.load();
-    do {
-        if (used >= MaxJobs)
-            return {};
-    } while (!activeJobs.compare_exchange_weak(used, used + 1));
-    return {&activeJobs, [](void *) { --activeJobs; }};
-}
-} // namespace
-
 struct ImvImageJob::State {
     enum Method { Inspect, Sample, Render };
     struct Dispatch {
@@ -35,16 +20,12 @@ struct ImvImageJob::State {
     };
     struct Active {
         int id;
-        int poolId = 0;
         Method method;
         QString destination, format;
         std::atomic<Publication> phase{Publication::Staging};
         std::function<void()> cancelProvider;
-        bool awaitingProvider = false;
-        std::shared_ptr<void> permit;
-        std::shared_ptr<void> preparing;
-        OpenedSource source;
-        QMetaObject::Connection waitCapacity;
+        bool encoding = false;
+        ImagePipeline::Interest interest;
     };
 
     explicit State(ImvImageJob &owner) : q(owner), dispatch(std::make_shared<Dispatch>()) {
@@ -57,12 +38,9 @@ struct ImvImageJob::State {
             dispatch->target = nullptr;
         }
         for (const auto &job : std::as_const(jobs)) {
-            job->preparing.reset();
-            QObject::disconnect(job->waitCapacity);
             auto expected = Publication::Staging;
             job->phase.compare_exchange_strong(expected, Publication::Cancelled);
-            if (job->poolId > 0 && pool)
-                pool->cancel(job->poolId);
+            job->interest.reset();
             if (auto cancel = std::exchange(job->cancelProvider, {}))
                 cancel();
         }
@@ -93,98 +71,48 @@ struct ImvImageJob::State {
                 path = QDir::current().absoluteFilePath(path);
             }
         }
-        const bool fromProvider = !argumentError && url.scheme() == "image";
-        if (!argumentError && !fromProvider) {
-            if (!pool)
-                pool = &decoderPool();
-            if (pool->capacity() == Pool::Admission::Exhausted)
-                return -3;
-            if (pool->capacity() == Pool::Admission::Busy)
-                return -2;
-        }
-        auto permit = reserveJob();
-        if (!permit)
-            return -2;
         auto job = std::shared_ptr<Active>(
-            new Active{++lastId, 0, method, std::move(path), std::move(format)});
-        job->permit = std::move(permit);
-        const auto failLater = [this, &job](Failure error) {
-            jobs.insert(job->id, job);
-            QMetaObject::invokeMethod(
-                &q, [this, job, error = std::move(error)] { finish(job, asMap(error)); },
-                Qt::QueuedConnection);
-        };
+            new Active{lastId + 1, method, std::move(path), std::move(format)});
         if (argumentError) {
-            failLater(std::move(argumentError));
+            ++lastId;
+            jobs.insert(job->id, job);
+            finishLater(job, asMap(argumentError));
             return job->id;
         }
+
         const QPointer<ImvImageJob> receiver(&q);
-        if (fromProvider) {
-            job->awaitingProvider = true;
-            jobs.insert(job->id, job);
-            const auto captured = [receiver, weak = std::weak_ptr(job),
-                                   spec](ProviderSnapshot snapshot) {
-                const auto active = weak.lock();
-                if (!receiver || !active)
-                    return;
-                QMetaObject::invokeMethod(
-                    receiver,
-                    [receiver, active, spec, snapshot = std::move(snapshot)] {
-                        if (receiver && active->phase.load() != Publication::Cancelled)
-                            receiver->d->decoded(active, rasterizeProvider(snapshot, spec));
-                    },
-                    Qt::QueuedConnection);
-            };
-            auto cancel = snapshotProvider(qmlEngine(&q), url, &q, captured);
-            if (receiver && job->phase.load() != Publication::Cancelled)
+        auto &pipeline = imagePipeline();
+        job->interest = pipeline.requestExplicit(
+            spec, [receiver, weak = std::weak_ptr(job)](Asset asset, Failure error) {
+                if (auto active = weak.lock(); receiver && active)
+                    receiver->d->decoded(active, std::move(asset), std::move(error));
+            });
+        if (!job->interest)
+            return -2;
+        ++lastId;
+        jobs.insert(job->id, job);
+        if (url.scheme() == "image") {
+            auto cancel = snapshotProvider(
+                qmlEngine(&q), url, &q,
+                [receiver, weak = std::weak_ptr(job)](ProviderSnapshot image) {
+                    if (const auto active = weak.lock(); receiver && active)
+                        imagePipeline().captured(active->interest, std::move(image));
+                });
+            if (receiver && job->interest)
                 job->cancelProvider = std::move(cancel);
             else if (cancel)
                 cancel();
-            return job->id;
+        } else {
+            pipeline.captured(job->interest, captureSource(url));
         }
-        job->preparing =
-            prepareSource(url, [receiver, weak = std::weak_ptr(job), spec](OpenedSource source) {
-                auto active = weak.lock();
-                if (!receiver || !active)
-                    return;
-                active->preparing.reset();
-                if (source.error) {
-                    receiver->d->finish(active, asMap(source.error));
-                    return;
-                }
-                active->source = std::move(source);
-                receiver->d->dispatchDecode(active, spec);
-            });
-        if (!job->preparing)
-            return -2;
-        jobs.insert(job->id, job);
         return job->id;
     }
 
-    void dispatchDecode(const std::shared_ptr<Active> &job, DecodeSpec spec) {
-        const QPointer receiver(&q);
-        if (pool && pool->capacity() == Pool::Admission::Busy) {
-            if (!job->waitCapacity)
-                job->waitCapacity = QObject::connect(
-                    pool, &Pool::capacityReleased, &q, [receiver, weak = std::weak_ptr(job), spec] {
-                        if (auto active = weak.lock(); receiver && active)
-                            receiver->d->dispatchDecode(active, spec);
-                    });
-            return;
-        }
-        QObject::disconnect(std::exchange(job->waitCapacity, {}));
-        const auto ticket = pool ? submitDecode(*pool, std::move(job->source.fd), spec,
-                                                [receiver, job](Decoded image) mutable {
-                                                    if (receiver)
-                                                        receiver->d->decoded(job, std::move(image));
-                                                })
-                                 : Pool::Ticket{Pool::Admission::Invalid};
-        if (ticket.status != Pool::Admission::Accepted) {
-            finish(job, asMap(Failure{"admission", "output-failed",
-                                      "Cannot allocate decode output or ticket"}));
-            return;
-        }
-        job->poolId = ticket.id;
+    void finishLater(const std::shared_ptr<Active> &job, QVariantMap result = {}) {
+        QMetaObject::invokeMethod(
+            &q,
+            [this, job, result = std::move(result)]() mutable { finish(job, std::move(result)); },
+            Qt::QueuedConnection);
     }
 
     void finish(const std::shared_ptr<Active> &job, QVariantMap result) {
@@ -192,37 +120,38 @@ struct ImvImageJob::State {
             return;
         if (job->phase.load() == Publication::Cancelled)
             result = asMap(Failure{"helper", "cancelled", "Image job cancelled"});
-        job->permit.reset();
-        emit q.finished(job->id, result);
+        job->interest.reset();
+        const QPointer receiver(&q);
+        if (auto cancel = std::exchange(job->cancelProvider, {}))
+            cancel();
+        if (receiver)
+            emit receiver->finished(job->id, result);
     }
 
-    void decoded(const std::shared_ptr<Active> &job, Decoded image) {
-        job->poolId = 0;
-        job->awaitingProvider = false;
-        job->cancelProvider = {};
-        if (job->phase.load() == Publication::Cancelled || image.error) {
-            finish(job, asMap(image.error));
+    void decoded(const std::shared_ptr<Active> &job, Asset image, Failure error) {
+        if (job->phase.load() == Publication::Cancelled || error) {
+            finish(job, asMap(error));
             return;
         }
         QVariantMap result{{"stage", "complete"},
                            {"code", QString{}},
                            {"detail", QString{}},
-                           {"sourceInfo", asMap(image.source)}};
+                           {"sourceInfo", asMap(image->info)}};
         if (job->method == Inspect) {
             finish(job, std::move(result));
             return;
         }
-        result.insert("width", image.pixels.width());
-        result.insert("height", image.pixels.height());
+        result.insert("width", image->pixels.width());
+        result.insert("height", image->pixels.height());
         if (job->method == Sample) {
             result.insert("rgba",
-                          QByteArray(reinterpret_cast<const char *>(image.pixels.constBits()),
-                                     image.pixels.sizeInBytes()));
+                          QByteArray(reinterpret_cast<const char *>(image->pixels.constBits()),
+                                     image->pixels.sizeInBytes()));
             finish(job, std::move(result));
             return;
         }
-        QThreadPool::globalInstance()->start([dispatch = dispatch, job,
-                                              image = std::move(image.pixels),
+        job->encoding = true;
+        QThreadPool::globalInstance()->start([dispatch = dispatch, job, image = image->pixels,
                                               result = std::move(result)]() mutable {
             auto error = stageImage(job->destination, job->format, image, job->phase);
             image = {};
@@ -241,7 +170,6 @@ struct ImvImageJob::State {
     }
 
     ImvImageJob &q;
-    QPointer<Pool> pool;
     std::shared_ptr<Dispatch> dispatch;
     QHash<int, std::shared_ptr<Active>> jobs;
     int lastId = 0;
@@ -265,20 +193,11 @@ bool ImvImageJob::cancel(int id) {
     auto expected = Publication::Staging;
     if (!job || !job->phase.compare_exchange_strong(expected, Publication::Cancelled))
         return false;
-    if (job->poolId > 0 && d->pool)
-        d->pool->cancel(job->poolId);
-    else if (job->preparing || job->waitCapacity) {
-        job->preparing.reset();
-        QObject::disconnect(std::exchange(job->waitCapacity, {}));
-        job->source = {};
-        QMetaObject::invokeMethod(this, [this, job] { d->finish(job, {}); }, Qt::QueuedConnection);
-    } else if (job->awaitingProvider) {
-        const QPointer guard(this);
+    if (!job->encoding) {
+        job->interest.reset();
+        d->finishLater(job);
         if (auto cancel = std::exchange(job->cancelProvider, {}))
             cancel();
-        if (guard)
-            QMetaObject::invokeMethod(
-                this, [this, job] { d->finish(job, {}); }, Qt::QueuedConnection);
     }
     return true;
 }

@@ -74,14 +74,20 @@ entries fall back to the decoder. The store never fetches a network source.
 if the private pixel store is off. `size` selects one of the freedesktop
 buckets: 128, 256, 512, or 1024. A positive ticket yields
 `thumbnailFinished(id, result)` with `stage`, `code`, `detail`, and on success
-`destination`. The output is an atomic PNG with original URI and mtime.
+`destination`. The source is opened at call time. The output is an atomic PNG
+with original URI and mtime; it is not written if the URI no longer names the
+captured revision.
 
 ## Image jobs
 
 `ImvImageJob` needs no display or window. Its methods accept local paths,
 local `file:` URLs, and percent-encoded or base64 `data:` URLs. Jobs associated
-with a QML engine also accept `image://provider/id` and snapshot the source at
-call time, or on arrival for an async response. Jobs never fetch network URLs.
+with a QML engine also accept `image://provider/id`. The call owns the encoded
+data URL or opened file descriptor, or snapshots the provider's pixels.
+Async providers are requested during the call and snapshotted when their
+response arrives. Files are copied off the GUI thread; rename or unlink does
+not substitute a different file, but callers must not edit the open file in
+place before it is copied. Jobs never fetch network URLs.
 Uncompressed output edges must be 1 to 8192 pixels.
 
 | Method | Successful result |
@@ -96,24 +102,24 @@ supports same-directory hard links. It never replaces a name. `cancel(id)`
 returns false if the ticket is gone or atomic publication has begun; if it
 returns true, the job cannot publish its output.
 
-A positive ticket is local admission. `finished(id, result)` is delivered
-once, queued, while the receiver exists. The result always includes `stage`,
-`code`, `detail`; success is `complete` with empty code and detail. `-2`
-means temporarily busy; retry with backoff. `-3` signals ticket exhaustion.
-Negative admissions do not emit `finished`.
-Provider and encoded jobs use the same end-to-end admission budget. An
-admitted export occupies its slot through encoding and publication. Encoded
-source preparation is asynchronous. Only `ImvImageJob` exposes busy (`-2`).
+A positive ticket is returned immediately, including for queued work.
+`finished(id, result)` is delivered once, queued, while the receiver exists.
+The result always includes `stage`, `code`, `detail`; success is `complete` with
+empty code and detail. A job can be cancelled by ticket while queued. `-2` is
+rare: only a full shared queue returns busy, and no input is captured. Retry
+only if the original input is still available. `-3` signals local ticket
+exhaustion. Negative returns do not emit `finished`.
 
 `ImvImage` remains `Loading` while waiting for admission. Visible items go
 first; within each priority, pending requests go in arrival order. Source
 replacement, a resize that changes the requested decode size, or item
-destruction withdraws the old request. The pipeline holds at most 128
-requests and gives queued preparation and helper admission eight seconds;
-overflow or expiry reports `admission/deadline`, not `busy`. Helper execution
-has its own deadline after admission. Video frame sources follow the same
-rules. `ImvCache.exportThumbnail` uses background decode priority and a
-separate bounded writer wait; writer overflow or expiry is `store/deadline`.
+destruction withdraws the old request. Display, jobs and thumbnail decodes
+share the 128-request limit and the eight-second admission deadline. Jobs and
+thumbnail decodes use background priority. Admission expiry is
+`admission/deadline`; display and thumbnail decode overflow report the same
+code. Helper execution has its own deadline. Video frame sources follow the
+same rules. A render keeps its execution slot through encoding and
+publication. Thumbnail writer overflow or expiry is `store/deadline`.
 
 The process pool is private. Its capacity pressure is retryable admission
 (`Busy`), not a terminal error. Process outcomes carry `stage: "helper"`

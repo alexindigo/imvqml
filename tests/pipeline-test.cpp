@@ -139,6 +139,41 @@ private slots:
         QCOMPARE(pipeline.submissions(), 0u);
     }
 
+    void explicitQueueDeadline() {
+        Pool pool(
+            [] {
+                auto process = std::make_unique<PixelChild>();
+                process->held = true;
+                return process;
+            },
+            1, 32);
+        QCOMPARE(
+            submitDecode(pool, openSource(QByteArray("blocker")).fd, {}, [](Decoded) {}).status,
+            Pool::Admission::Accepted);
+        QSignalSpy releases(&pool, &Pool::capacityReleased);
+        ImagePipeline pipeline(pool, nullptr, 100);
+        int events = 0;
+        const auto done = [&](Asset asset, Failure failure) {
+            ++events;
+            QVERIFY(!asset);
+            QCOMPARE(failure.stage, "admission");
+            QCOMPARE(failure.code, "deadline");
+        };
+        const auto spec = DecodeSpec{DecodeSpec::Pixels, {8, 4}};
+        auto ready = pipeline.requestExplicit(spec, done);
+        QImage pixels(8, 4, QImage::Format_RGBA8888);
+        pixels.fill(Qt::white);
+        pipeline.captured(ready, ProviderSnapshot{pixels.size(), pixels, {}});
+        auto awaiting = pipeline.requestExplicit(spec, done);
+        QVERIFY(ready && awaiting);
+        QTRY_COMPARE(events, 2);
+        QCOMPARE(releases.size(), 0);
+        QCOMPARE(pipeline.submissions(), 0u);
+        pipeline.captured(awaiting, ProviderSnapshot{pixels.size(), pixels, {}});
+        QCoreApplication::processEvents();
+        QCOMPARE(events, 2);
+    }
+
     void immutableRevision() {
         QTemporaryDir dir;
         QVERIFY(dir.isValid());

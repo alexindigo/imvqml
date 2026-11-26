@@ -50,28 +50,32 @@ descriptor size agree. A read-only mapping
 backs the owned frame value; the caller does not decode a PNG or WebP.
 The pool's still deadline is 8 seconds and helper address space is 1 GiB.
 
-`ImvImageJob` maps client IDs to the pool ledger and separates inspect,
-sample and render results. Export passes already-decoded pixels to a Qt
-worker for encoding. Two job permits cover provider or helper work through
-encoding and delivery. A separate bounded source queue materializes encoded
-inputs outside the GUI thread; pending store lookups borrow their caller's input.
-Export stages in a descriptor-held directory and a
-single cancellation/publication gate precedes `linkat` no-clobber commit.
+`ImvImageJob` maps client IDs to interests in the shared pipeline ledger and
+separates inspect, sample and render results. One-shot jobs neither coalesce
+nor use the display cache. The dispatcher limits active one-shot processing
+to two slots, including a live render's worker encoding and publication;
+slot pressure never rejects a call. Export stages in a descriptor-held
+directory and a single cancellation/publication gate precedes `linkat`
+no-clobber commit.
 
 ## Display
 
 `ImvImage` adapts sources and snapshots physical bounds and fill intent. The
 GUI-affine pipeline keys requests by source revision (file stat including
 ctime, or digest of immutable owned bytes) and the encoded decode spec. A
-bounded pipeline queue owns requests before source preparation through helper
-admission. It selects visible items first, then FIFO within a priority, and
-uses current visibility while requests wait. Source preparation reserves room
+single bounded pipeline queue owns display and explicit requests before
+source preparation through helper admission. It selects visible items first,
+then FIFO within a priority, and uses current visibility while requests wait.
+Explicit jobs enter at background priority. Source preparation reserves room
 against idle helpers rather than pre-staging a backlog of sealed snapshots;
-promotion does not interrupt a preparation or decode already in flight.
+its bounded worker materializes encoded inputs off the GUI thread. Promotion
+does not interrupt a preparation or decode already in flight.
 Source and helper capacity release wake the dispatcher. Queued admission has
 an eight-second monotonic deadline, separate from the helper's execution timer;
 an animation classification reply opens a fresh admission window for pixels.
-Queue overflow is an admission deadline, not Busy. After source identity is
+Only hard queue overflow rejects an explicit image job before capture; it
+returns busy without issuing a ticket. Display and thumbnail decode overflow
+report an admission deadline. After source identity is
 known, matching work coalesces and the last listener's withdrawal drops queued
 work or cancels an admitted ticket. Withdrawal is independent of helper
 retirement. A generation
@@ -80,10 +84,12 @@ outcome separately. A failed update can keep the last valid texture for the
 same source; a successful replacement recovers the item. The pipeline's result index
 is weak: it owns neither idle mappings nor scene-graph resources.
 
-Qt image providers are a separate source boundary: items and image jobs take
-ownership of native-size CPU pixels on the GUI thread at assignment or job
-admission, or when an async response arrives. Fitting and rendering read only
-that snapshot, so geometry changes cannot re-request transient provider pixels.
+Explicit calls immediately own their encoded data or file descriptor, or
+request a provider snapshot, before waiting for helper capacity. Qt image
+providers are a separate source boundary: items and image jobs own native-size
+CPU pixels on the GUI thread at assignment or call time, or when an async
+response arrives. Fitting and rendering never re-request transient provider
+pixels. Withdrawal releases queued input and cancels provider response interest.
 
 Each window's scene graph owns a render-thread texture LRU. Scene-graph nodes
 hold texture leases. Still-image entries keep and account for reusable decoded

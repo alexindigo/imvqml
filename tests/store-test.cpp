@@ -94,6 +94,26 @@ private slots:
         QCOMPARE(bits.st_mode & 0777u, 0600u);
     }
 
+    void thumbnailRejectsReplacedSource() {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        qputenv("XDG_CACHE_HOME", QFile::encodeName(directory.path()));
+        ImvCache policy;
+        QSignalSpy done(&policy, &ImvCache::thumbnailFinished);
+        const auto path = directory.filePath("transient.png");
+        QVERIFY(QFile::copy(IMV_FIXTURES "/palette.png", path));
+        const int id = policy.exportThumbnail(QUrl::fromLocalFile(path));
+        QVERIFY(id > 0);
+        QVERIFY(QFile::remove(path));
+        QVERIFY(QFile::copy(IMV_FIXTURES "/alpha.png", path));
+        QTRY_COMPARE(done.size(), 1);
+        QCOMPARE(done.first().at(0).toInt(), id);
+        const auto result = done.first().at(1).toMap();
+        QCOMPARE(result.value("stage").toString(), "store");
+        QCOMPARE(result.value("code").toString(), "write-failed");
+        QVERIFY(!result.contains("destination"));
+    }
+
     void thumbnailBurst() {
         QTemporaryDir directory;
         QVERIFY(directory.isValid());

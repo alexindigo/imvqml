@@ -101,31 +101,42 @@ int ImvCache::exportThumbnail(const QUrl &source, int size) {
         return id;
     }
     path = QDir::cleanPath(QDir::current().absoluteFilePath(path));
-    d->exports.insert(
-        id, imagePipeline().request(
-                SourceInput(QUrl::fromLocalFile(path)), {DecodeSpec::Pixels, {size, size}},
-                [self = QPointer(this), id, path, size](Asset asset, Failure error) {
+    auto &pipeline = imagePipeline();
+    auto interest = pipeline.requestExplicit(
+        {DecodeSpec::Pixels, {size, size}},
+        [self = QPointer(this), id, path, size](Asset asset, Failure error) {
+            if (!self)
+                return;
+            if (error || !asset->file) {
+                self->finish(
+                    id, asMap(error ? error
+                                    : Failure{"open", "unreadable", "Missing source revision"}));
+                return;
+            }
+            imageStore().thumbnail(
+                path, *asset->file, asset->pixels, asset->info, size, self->d->exports.value(id),
+                [self, id](Failure failure, QUrl output) {
                     if (!self)
                         return;
-                    if (error || !asset->file) {
-                        self->finish(id, asMap(error ? error
-                                                     : Failure{"open", "unreadable",
-                                                               "Missing source revision"}));
-                        return;
-                    }
-                    imageStore().thumbnail(
-                        path, *asset->file, asset->pixels, asset->info, size,
-                        self->d->exports.value(id), [self, id](Failure failure, QUrl output) {
-                            if (!self)
-                                return;
-                            auto result =
-                                failure ? asMap(failure) : asMap(Failure{"complete", {}, {}});
-                            if (!failure)
-                                result.insert("destination", output);
-                            self->finish(id, result);
-                        });
-                },
-                false));
+                    auto result = failure ? asMap(failure) : asMap(Failure{"complete", {}, {}});
+                    if (!failure)
+                        result.insert("destination", output);
+                    self->finish(id, result);
+                });
+        },
+        ImagePipeline::Explicit::Thumbnail);
+    if (!interest) {
+        QMetaObject::invokeMethod(
+            this,
+            [this, id] {
+                finish(id,
+                       asMap(Failure{"admission", "deadline", "Image admission queue is full"}));
+            },
+            Qt::QueuedConnection);
+    } else {
+        d->exports.insert(id, interest);
+        pipeline.captured(interest, captureSource(QUrl::fromLocalFile(path)));
+    }
     return id;
 }
 

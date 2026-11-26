@@ -32,7 +32,7 @@ OpenedSource fail(QString stage, QString code, QString detail) {
 
 using Mapping = std::shared_ptr<const uchar>;
 struct SourceTask {
-    SourceInput input;
+    PreparationInput input;
     SourceReady ready;
     std::atomic_bool live{true};
 };
@@ -169,19 +169,42 @@ QString localPath(const QUrl &url) {
     return path.contains(QChar::Null) ? QString{} : path;
 }
 
-OpenedSource openSource(const QUrl &url) {
+CapturedSource captureSource(const QUrl &url) {
     if (url.scheme() == "data")
-        return openData(url);
+        return {url};
     const auto path = localPath(url);
     if (path.isEmpty())
-        return fail("admission", "invalid-source",
-                    "Only local paths, file URLs and data URLs are supported here");
+        return {{},
+                {},
+                {},
+                {"admission", "invalid-source",
+                 "Only local paths, file URLs and data URLs are supported here"}};
     Fd fd(::open(QFile::encodeName(path).constData(), O_RDONLY | O_CLOEXEC | O_NONBLOCK));
     struct stat info{};
     if (!fd || ::fstat(fd.get(), &info) != 0 || !S_ISREG(info.st_mode))
-        return fail("open", "unreadable", "Cannot open a readable regular file");
+        return {{}, {}, {}, {"open", "unreadable", "Cannot open a readable regular file"}};
     if (info.st_size > MaxSourceBytes)
-        return fail("admission", "too-large", "Source exceeds 256 MiB");
+        return {{}, {}, {}, {"admission", "too-large", "Source exceeds 256 MiB"}};
+    return {{}, std::move(fd), info};
+}
+
+namespace {
+bool sameContentStat(const struct stat &a, const struct stat &b) {
+    return a.st_size == b.st_size && a.st_mtim.tv_sec == b.st_mtim.tv_sec &&
+           a.st_mtim.tv_nsec == b.st_mtim.tv_nsec;
+}
+
+OpenedSource materialize(CapturedSource source) {
+    if (source.error)
+        return {{}, {}, std::move(source.error)};
+    if (!source.fd)
+        return openData(source.data);
+    const auto &fd = source.fd;
+    const auto &info = source.file;
+    // Rename/unlink can change ctime without changing the owned file's pixels.
+    struct stat before{};
+    if (::fstat(fd.get(), &before) || !sameContentStat(info, before))
+        return fail("open", "unreadable", "Source was modified before snapshot");
     const auto number = [](auto value) { return QByteArray::number(value); };
     auto identity = "file/" + number(info.st_dev) + '/' + number(info.st_ino) + '/' +
                     number(info.st_size) + '/' + number(info.st_mtim.tv_sec) + '/' +
@@ -201,15 +224,16 @@ OpenedSource openSource(const QUrl &url) {
         position += count;
     }
     struct stat after{};
-    if (::fstat(fd.get(), &after) || info.st_size != after.st_size ||
-        info.st_mtim.tv_sec != after.st_mtim.tv_sec ||
-        info.st_mtim.tv_nsec != after.st_mtim.tv_nsec ||
-        info.st_ctim.tv_sec != after.st_ctim.tv_sec ||
-        info.st_ctim.tv_nsec != after.st_ctim.tv_nsec ||
+    if (::fstat(fd.get(), &after) || !sameContentStat(before, after) ||
+        before.st_ctim.tv_sec != after.st_ctim.tv_sec ||
+        before.st_ctim.tv_nsec != after.st_ctim.tv_nsec ||
         ::fcntl(snapshot.get(), F_ADD_SEALS, MemfdSeals) < 0)
         return fail("open", "unreadable", "Could not seal an unchanged source revision");
     return {std::move(snapshot), std::move(identity), {}, info};
 }
+} // namespace
+
+OpenedSource openSource(const QUrl &url) { return materialize(captureSource(url)); }
 
 OpenedSource openSource(const QByteArray &bytes) {
     if (bytes.size() > MaxSourceBytes)
@@ -223,19 +247,23 @@ OpenedSource openSource(const QByteArray &bytes) {
             {}};
 }
 
-std::shared_ptr<void> prepareSource(const SourceInput &input, SourceReady ready) {
+std::shared_ptr<void> prepareSource(PreparationInput &input, SourceReady ready) {
     auto &service = sourceWorker();
     constexpr int SourceCapacity = 4;
     if (service.outstanding >= SourceCapacity)
         return {};
-    auto task = std::shared_ptr<SourceTask>(new SourceTask{input, std::move(ready)});
+    auto task = std::shared_ptr<SourceTask>(new SourceTask{std::move(input), std::move(ready)});
     ++service.outstanding;
     service.pool.start([owner = &service, weak = std::weak_ptr(task)] {
         const auto task = weak.lock();
         OpenedSource result;
         if (task && task->live) {
-            result = std::visit([](const auto &input) { return openSource(input); }, task->input);
-            task->input = QUrl{};
+            if (auto *captured = std::get_if<CapturedSource>(&task->input))
+                result = materialize(std::move(*captured));
+            else
+                result = std::visit([](const auto &input) { return openSource(input); },
+                                    std::get<SourceInput>(task->input));
+            task->input = SourceInput{};
         }
         QMetaObject::invokeMethod(
             owner,

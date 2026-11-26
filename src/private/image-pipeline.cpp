@@ -7,7 +7,7 @@
 
 namespace Imv {
 namespace {
-Failure expired() { return {"admission", "deadline", "Display admission deadline expired"}; }
+Failure expired() { return {"admission", "deadline", "Image admission deadline expired"}; }
 } // namespace
 
 ImagePipeline::ImagePipeline(Pool &pool, QObject *parent, int waitMs)
@@ -21,6 +21,50 @@ ImagePipeline::ImagePipeline(Pool &pool, QObject *parent, int waitMs)
 
 ImagePipeline::Interest ImagePipeline::request(std::variant<SourceInput, OpenedSource> source,
                                                DecodeSpec spec, Done done, bool visible) {
+    auto lease = listen(std::move(done), visible);
+    if (!spec.valid()) {
+        deliver(lease, {},
+                {"admission", "invalid-size", "Physical size exceeds the output edge limit"});
+    } else if (m_queue.size() >= QueueLimit) {
+        deliver(lease, {}, {"admission", "deadline", "Image admission queue is full"});
+    } else {
+        auto request = enqueue(lease, spec, Waiting);
+        std::visit([&](auto &&input) { request->source = std::move(input); }, std::move(source));
+    }
+    return lease;
+}
+
+ImagePipeline::Interest ImagePipeline::requestExplicit(DecodeSpec spec, Done done, Explicit kind) {
+    if (m_queue.size() >= QueueLimit)
+        return {};
+    auto lease = listen(std::move(done), false);
+    enqueue(lease, spec, Capturing)->oneShot = kind == Explicit::OneShot;
+    return lease;
+}
+
+void ImagePipeline::captured(const Interest &interest,
+                             std::variant<CapturedSource, ProviderSnapshot> input) {
+    auto request = interest ? interest->pending.lock() : nullptr;
+    if (!request || request->phase != Capturing || !m_queue.contains(request))
+        return;
+    if (request->deadline.hasExpired()) {
+        finish(request, {{}, {}, expired()});
+        return;
+    }
+    std::visit(
+        [&](auto &&captured) {
+            if (captured.error) {
+                finish(request, {{}, {}, std::move(captured.error)});
+            } else {
+                request->source = std::move(captured);
+                request->phase = Waiting;
+                pumpLater();
+            }
+        },
+        std::move(input));
+}
+
+ImagePipeline::Interest ImagePipeline::listen(Done done, bool visible) {
     Interest lease(new Listener, [self = QPointer(this)](Listener *listener) {
         auto request = listener->pending.lock();
         delete listener;
@@ -32,23 +76,21 @@ ImagePipeline::Interest ImagePipeline::request(std::variant<SourceInput, OpenedS
     });
     lease->done = std::move(done);
     lease->visible = visible;
-    if (!spec.valid()) {
-        deliver(lease, {},
-                {"admission", "invalid-size", "Physical size exceeds the output edge limit"});
-    } else if (m_queue.size() >= QueueLimit) {
-        deliver(lease, {}, {"admission", "deadline", "Display admission queue is full"});
-    } else {
-        auto request = std::make_shared<Pending>();
-        request->source = std::move(source);
-        request->spec = spec;
-        request->deadline = QDeadlineTimer(m_waitMs, Qt::PreciseTimer);
-        request->order = ++m_order;
-        request->listeners.append(lease);
-        lease->pending = request;
-        m_queue.append(std::move(request));
-        pumpLater();
-    }
     return lease;
+}
+
+std::shared_ptr<ImagePipeline::Pending> ImagePipeline::enqueue(const Interest &interest,
+                                                               DecodeSpec spec, Phase phase) {
+    auto request = std::make_shared<Pending>();
+    request->spec = spec;
+    request->phase = phase;
+    request->deadline = QDeadlineTimer(m_waitMs, Qt::PreciseTimer);
+    request->order = ++m_order;
+    request->listeners.append(interest);
+    interest->pending = request;
+    m_queue.append(request);
+    pumpLater();
+    return request;
 }
 
 void ImagePipeline::setVisible(const Interest &interest, bool visible) {
@@ -58,13 +100,19 @@ void ImagePipeline::setVisible(const Interest &interest, bool visible) {
 
 void ImagePipeline::opened(const std::shared_ptr<Pending> &request, OpenedSource source) {
     request->preparing.reset();
-    request->source = SourceInput{};
+    request->source = PreparationInput{};
     if (request->deadline.hasExpired()) {
         finish(request, {{}, {}, expired()});
         return;
     }
     if (source.error) {
         finish(request, {{}, {}, std::move(source.error)});
+        return;
+    }
+    if (request->oneShot) {
+        request->input = std::make_shared<Fd>(std::move(source.fd));
+        request->file = source.file;
+        request->phase = Ready;
         return;
     }
     auto &store = imageStore();
@@ -129,13 +177,20 @@ void ImagePipeline::pump() {
     // keeps sealed snapshots bounded, and avoids pre-staging hidden work.
     constexpr int StagedLimit = 4;
     for (const auto &request : QList(m_queue)) {
-        if (request->phase != Decoding && request->deadline.hasExpired())
+        if (request->phase != Decoding && request->phase != Finishing &&
+            request->deadline.hasExpired())
             finish(request, {{}, {}, expired()});
     }
     bool sourceBusy = false;
     for (;;) {
         const auto reservations = std::ranges::count_if(m_queue, [](const auto &request) {
-            return request->phase != Waiting && request->phase != Decoding;
+            return request->phase == Preparing || request->phase == LookingUp ||
+                   request->phase == Ready;
+        });
+        // A one-shot job retains its slot through publication, so payloads
+        // cannot accumulate in the render encoder's worker queue.
+        const auto activeJobs = std::ranges::count_if(m_queue, [](const auto &request) {
+            return request->oneShot && (request->phase == Decoding || request->phase == Finishing);
         });
         const auto capacity = m_pool.capacity();
         const bool canStage = reservations < qMin(m_pool.idleSlots(), StagedLimit) ||
@@ -145,9 +200,13 @@ void ImagePipeline::pump() {
         bool nextVisible = false;
         for (const auto &candidate : std::as_const(m_queue)) {
             const bool alreadyOpen = std::holds_alternative<OpenedSource>(candidate->source);
+            const bool provider = std::holds_alternative<ProviderSnapshot>(candidate->source);
+            if (candidate->oneShot && activeJobs >= 2)
+                continue;
             if (!(candidate->phase == Ready && canDecode) &&
-                !(candidate->phase == Waiting &&
-                  (alreadyOpen ? reservations < StagedLimit : canStage && !sourceBusy)))
+                !(candidate->phase == Waiting && (alreadyOpen ? reservations < StagedLimit
+                                                  : provider  ? canDecode
+                                                              : canStage && !sourceBusy)))
                 continue;
             const bool visible = std::ranges::any_of(candidate->listeners, [](const auto &weak) {
                 const auto listener = weak.lock();
@@ -165,13 +224,17 @@ void ImagePipeline::pump() {
             finish(next, {{}, {}, expired()});
         } else if (next->phase == Ready) {
             submit(next);
+        } else if (auto *provider = std::get_if<ProviderSnapshot>(&next->source)) {
+            auto decoded = rasterizeProvider(*provider, next->spec);
+            next->source = PreparationInput{};
+            finish(next, std::move(decoded));
         } else if (auto *input = std::get_if<OpenedSource>(&next->source)) {
             // Consume the variant before opened() clears it or changes phase.
             auto source = std::move(*input);
             opened(next, std::move(source));
         } else {
             next->preparing = prepareSource(
-                std::get<SourceInput>(next->source),
+                std::get<PreparationInput>(next->source),
                 [self = QPointer(this), weak = std::weak_ptr(next)](OpenedSource source) {
                     if (const auto active = weak.lock();
                         self && active && self->m_queue.contains(active)) {
@@ -181,7 +244,7 @@ void ImagePipeline::pump() {
                 });
             if (next->preparing) {
                 next->phase = Preparing;
-                next->source = SourceInput{};
+                next->source = PreparationInput{};
             } else {
                 sourceBusy = true;
             }
@@ -190,7 +253,7 @@ void ImagePipeline::pump() {
     qint64 remaining = m_waitMs;
     bool hasDeadline = false;
     for (const auto &request : std::as_const(m_queue)) {
-        if (request->phase != Decoding) {
+        if (request->phase != Decoding && request->phase != Finishing) {
             hasDeadline = true;
             remaining = qMin(remaining, request->deadline.remainingTime());
         }
@@ -226,7 +289,7 @@ void ImagePipeline::submit(const std::shared_ptr<Pending> &request) {
         return;
     if (ticket.status != Pool::Admission::Accepted) {
         finish(request,
-               {{}, {}, {"admission", "output-failed", "Could not admit a display decode"}});
+               {{}, {}, {"admission", "output-failed", "Could not admit an image decode"}});
         return;
     }
     request->phase = Decoding;
@@ -258,6 +321,15 @@ void ImagePipeline::deliver(std::weak_ptr<Listener> listener, Asset asset, Failu
 
 void ImagePipeline::finish(const std::shared_ptr<Pending> &request, Decoded decoded, bool hit,
                            Asset asset) {
+    if (request->oneShot && !decoded.error) {
+        request->phase = Finishing;
+        request->input.reset();
+        asset = std::make_shared<const ImageAsset>(
+            ImageAsset{{}, std::move(decoded.source), std::move(decoded.pixels)});
+        for (const auto &weak : std::as_const(request->listeners))
+            deliver(weak, asset, {});
+        return;
+    }
     remove(request);
     if (!hit && request->cached.lease)
         imageStore().publish(request->cached, decoded);

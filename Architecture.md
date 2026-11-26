@@ -62,6 +62,11 @@ revokes delivery interest independently of helper retirement. A generation
 guards decode and texture outcomes at the item. The pipeline's result index
 is weak: it owns neither idle mappings nor scene-graph resources.
 
+Qt image providers are a separate source boundary: items and image jobs take
+ownership of native-size CPU pixels on the GUI thread at assignment or job
+admission, or when an async response arrives. Fitting and rendering read only
+that snapshot, so geometry changes cannot re-request transient provider pixels.
+
 Each window's scene graph owns a render-thread texture LRU. Scene-graph nodes
 hold texture leases; texture entries hold the decoded asset for reuse. One
 texture is shared across matching items regardless of mask or filtering.

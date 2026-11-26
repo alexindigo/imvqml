@@ -12,8 +12,11 @@ width and height explicitly or with anchors. Its `source` is a path, local
 `file:` URL, `data:` URL, or `image://provider/id`; `setBytes(bytes)` replaces
 the URL with owned encoded bytes. Network URLs are rejected. Qt image
 providers must return CPU-readable pixels; a GPU-only texture is not a byte
-source. Synchronous provider functions run on the GUI thread; async image
-responses are supported. No new codec runs in the application for providers.
+source. Provider sources are snapshotted when assigned. Synchronous providers
+are called on the GUI thread for their native-size pixels; async provider
+pixels are copied as soon as the response arrives. Resizing or changing fill
+mode uses the snapshot, not a new provider request. No new codec runs in the
+application for providers.
 
 | Property | Behavior |
 |---|---|
@@ -63,8 +66,10 @@ buckets: 128, 256, 512, or 1024. A positive ticket yields
 ## Image jobs
 
 `ImvImageJob` needs no display or window. Its methods accept local paths,
-local `file:` URLs, and percent-encoded or base64 `data:` URLs. It never
-fetches network URLs. Uncompressed output edges must be 1 to 8192 pixels.
+local `file:` URLs, and percent-encoded or base64 `data:` URLs. Jobs associated
+with a QML engine also accept `image://provider/id` and snapshot the source at
+call time, or on arrival for an async response. Jobs never fetch network URLs.
+Uncompressed output edges must be 1 to 8192 pixels.
 
 | Method | Successful result |
 |---|---|

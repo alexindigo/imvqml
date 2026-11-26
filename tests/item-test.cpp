@@ -8,11 +8,17 @@
 #include <QQuickItem>
 #include <QQuickWindow>
 #include <QtTest>
+#include <array>
+#include <imvqml/imvimagejob.h>
 
 class ItemTest : public QObject {
     Q_OBJECT
 private slots:
     void display();
+    void transientProvider_data();
+    void transientProvider();
+    void transientProviderJob();
+    void transientAsyncProviderJob();
     void animation();
     void cachePolicy();
 };
@@ -23,12 +29,178 @@ public:
     QImage requestImage(const QString &id, QSize *original, const QSize &requested) override {
         if (id != "yellow")
             return {};
-        *original = requested;
-        QImage image(requested, QImage::Format_RGBA8888);
+        const QSize size = requested.isEmpty() ? QSize(64, 64) : requested;
+        *original = size;
+        QImage image(size, QImage::Format_RGBA8888);
         image.fill(Qt::yellow);
         return image;
     }
 };
+
+class TransientProvider : public QQuickImageProvider {
+public:
+    explicit TransientProvider(ImageType type) : QQuickImageProvider(type) { storage.fill(255); }
+    void forget() {
+        storage.fill(0);
+        available = false;
+    }
+    QImage requestImage(const QString &, QSize *original, const QSize &) override {
+        ++requests;
+        onGuiThread = QThread::currentThread() == QCoreApplication::instance()->thread();
+        *original = {64, 64};
+        return available ? QImage(storage.data(), 64, 64, 64 * 4, QImage::Format_RGBA8888)
+                         : QImage();
+    }
+    QPixmap requestPixmap(const QString &id, QSize *original, const QSize &requested) override {
+        return QPixmap::fromImage(requestImage(id, original, requested));
+    }
+    int requests = 0;
+    bool onGuiThread = false;
+
+private:
+    std::array<uchar, 64 * 64 * 4> storage;
+    bool available = true;
+};
+
+class TransientResponse : public QQuickImageResponse {
+public:
+    explicit TransientResponse(QImage image) : m_image(std::move(image)) {}
+    QQuickTextureFactory *textureFactory() const override {
+        return QQuickTextureFactory::textureFactoryForImage(m_image);
+    }
+    void cancel() override {
+        QMetaObject::invokeMethod(this, &TransientResponse::finished, Qt::QueuedConnection);
+    }
+
+private:
+    QImage m_image;
+};
+
+class TransientAsyncProvider : public QQuickAsyncImageProvider {
+public:
+    QQuickImageResponse *requestImageResponse(const QString &, const QSize &) override {
+        storage.fill(255);
+        response =
+            new TransientResponse(QImage(storage.data(), 16, 16, 16 * 4, QImage::Format_RGBA8888));
+        return response;
+    }
+    void deliver() {
+        response->finished();
+        storage.fill(0);
+    }
+    QPointer<TransientResponse> response;
+
+private:
+    std::array<uchar, 16 * 16 * 4> storage;
+};
+
+void ItemTest::transientProvider_data() {
+    QTest::addColumn<int>("type");
+    QTest::newRow("Image") << int(QQuickImageProvider::Image);
+    QTest::newRow("Pixmap") << int(QQuickImageProvider::Pixmap);
+}
+
+void ItemTest::transientProvider() {
+    QFETCH(int, type);
+    QQmlEngine engine;
+    engine.addImportPath(IMV_IMPORT_PATH);
+    auto *provider = new TransientProvider(QQuickImageProvider::ImageType(type));
+    engine.addImageProvider("transient", provider);
+    QQmlComponent component(&engine);
+    component.setData(R"(
+import QtQuick
+import ImvQml
+Window {
+    width: 128; height: 128; color: "blue"
+    ImvImage { objectName: "preview" }
+}
+)",
+                      QUrl());
+    QTRY_VERIFY(!component.isLoading());
+    QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+    const std::unique_ptr<QObject> root(component.create());
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    auto *item = window ? window->findChild<Imv::ImvImage *>("preview") : nullptr;
+    QVERIFY(item);
+    item->setSource(QUrl("image://transient/once"));
+    provider->forget();
+    item->setSize({32, 32});
+    window->show();
+    QTRY_VERIFY(window->isExposed());
+    const auto pixel = [window](int x, int y) {
+        const auto frame = window->grabWindow();
+        const auto scale = frame.devicePixelRatio();
+        return frame.isNull() ? QColor() : frame.pixelColor(qRound(x * scale), qRound(y * scale));
+    };
+    QTRY_COMPARE_WITH_TIMEOUT(pixel(16, 16), QColor(Qt::white), 1500);
+    item->setSize({64, 64});
+    item->setFillMode(Imv::ImvImage::Cover);
+    QTRY_COMPARE_WITH_TIMEOUT(pixel(48, 48), QColor(Qt::white), 1500);
+    QTRY_COMPARE(item->status(), Imv::ImvImage::Ready);
+    QCOMPARE(provider->requests, 1);
+    QVERIFY(provider->onGuiThread);
+}
+
+void ItemTest::transientProviderJob() {
+    QQmlEngine engine;
+    engine.addImportPath(IMV_IMPORT_PATH);
+    auto *provider = new TransientProvider(QQuickImageProvider::Image);
+    engine.addImageProvider("transient", provider);
+    QQmlComponent component(&engine);
+    component.setData("import ImvQml\nImvImageJob {}", QUrl());
+    QTRY_VERIFY(!component.isLoading());
+    QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+    const std::unique_ptr<QObject> root(component.create());
+    auto *job = qobject_cast<Imv::ImvImageJob *>(root.get());
+    QVERIFY(job);
+    QSignalSpy done(job, &Imv::ImvImageJob::finished);
+    const auto url = QUrl("image://transient/once");
+    const int inspect = job->inspect(url);
+    const int sample = job->sample(url, 8, 8);
+    provider->forget();
+    QVERIFY(inspect > 0 && sample > 0);
+    QVERIFY(done.isEmpty());
+    QTRY_COMPARE(done.size(), 2);
+    QCOMPARE(done[0][0].toInt(), inspect);
+    QCOMPARE(done[1][0].toInt(), sample);
+    const auto info = done[0][1].toMap();
+    QCOMPARE(info.value("stage").toString(), QString("complete"));
+    QCOMPARE(info.value("sourceInfo").toMap().value("width").toInt(), 64);
+    QCOMPARE(done[1][1].toMap().value("rgba").toByteArray(), QByteArray(8 * 8 * 4, char(255)));
+    QCOMPARE(provider->requests, 2);
+    QVERIFY(provider->onGuiThread);
+}
+
+void ItemTest::transientAsyncProviderJob() {
+    QQmlEngine engine;
+    engine.addImportPath(IMV_IMPORT_PATH);
+    auto *provider = new TransientAsyncProvider;
+    engine.addImageProvider("transient", provider);
+    QQmlComponent component(&engine);
+    component.setData("import ImvQml\nImvImageJob {}", QUrl());
+    QTRY_VERIFY(!component.isLoading());
+    QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+    const std::unique_ptr<QObject> root(component.create());
+    auto *job = qobject_cast<Imv::ImvImageJob *>(root.get());
+    QVERIFY(job);
+    QSignalSpy done(job, &Imv::ImvImageJob::finished);
+    const auto url = QUrl("image://transient/once");
+    const int id = job->sample(url, 8, 8);
+    QVERIFY(id > 0 && provider->response);
+    provider->deliver();
+    QVERIFY(done.isEmpty());
+    QTRY_COMPARE(done.size(), 1);
+    QCOMPARE(done[0][0].toInt(), id);
+    QCOMPARE(done[0][1].toMap().value("rgba").toByteArray(), QByteArray(8 * 8 * 4, char(255)));
+    QTRY_VERIFY(!provider->response);
+    const int cancelled = job->sample(url, 8, 8);
+    QVERIFY(cancelled > 0 && provider->response);
+    QVERIFY(job->cancel(cancelled));
+    QTRY_COMPARE(done.size(), 2);
+    QCOMPARE(done[1][0].toInt(), cancelled);
+    QCOMPARE(done[1][1].toMap().value("code").toString(), QString("cancelled"));
+    QTRY_VERIFY(!provider->response);
+}
 
 void ItemTest::display() {
     QQmlEngine engine;

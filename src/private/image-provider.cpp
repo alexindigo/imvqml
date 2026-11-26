@@ -1,25 +1,40 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 #include "image-provider.h"
 
+#include <QCoreApplication>
 #include <QQmlEngine>
 #include <QQuickImageProvider>
+#include <QThread>
 
 namespace Imv {
 namespace {
-void deliver(QImage image, QSize original, DecodeSpec spec, const ImagePipeline::Done &done) {
-    if (image.isNull()) {
-        done({}, {"open", "unreadable", "Image provider did not return CPU pixels"});
-        return;
-    }
+ProviderSnapshot snapshot(QImage image, QSize original) {
+    if (image.isNull())
+        return {{}, {}, {"open", "unreadable", "Image provider did not return CPU pixels"}};
     if (!original.isValid() || original.isEmpty())
         original = image.size();
     if (qint64(original.width()) * original.height() > MaxSourcePixels ||
         qint64(image.width()) * image.height() > MaxSourcePixels) {
-        done({}, {"inspect", "too-large", "Provider frame exceeds 64 MiPixels"});
-        return;
+        return {{}, {}, {"inspect", "too-large", "Provider frame exceeds 64 MiPixels"}};
     }
     // The provider is application code and returns already-decoded pixels.
-    // Copy into an owned RGBA value; no codec runs on the GUI thread.
+    // QImage can alias mutable application memory even in the required format.
+    auto owned = image.format() == QImage::Format_RGBA8888
+                     ? image.copy()
+                     : image.convertToFormat(QImage::Format_RGBA8888);
+    if (owned.isNull())
+        return {{}, {}, {"decode", "output-failed", "Could not own provider pixels"}};
+    return {original, std::move(owned), {}};
+}
+} // namespace
+
+Decoded rasterizeProvider(const ProviderSnapshot &snapshot, DecodeSpec spec) {
+    if (snapshot.error)
+        return {{}, {}, snapshot.error};
+    const SourceInfo source{"provider", snapshot.original, 1, 1};
+    if (spec.mode == DecodeSpec::Inspect)
+        return {source, {}, {}};
+    QImage image = snapshot.pixels;
     auto target = spec.bounds;
     if (spec.scale == DecodeSpec::Cover) {
         target =
@@ -40,20 +55,20 @@ void deliver(QImage image, QSize original, DecodeSpec spec, const ImagePipeline:
     if (target != image.size())
         image = image.scaled(target, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
     image = image.convertToFormat(QImage::Format_RGBA8888);
-    if (image.isNull()) {
-        done({}, {"decode", "output-failed", "Could not normalize provider pixels"});
-        return;
-    }
-    done(imagePipeline().providerAsset(image.copy(), original, spec), {});
+    if (image.isNull())
+        return {{}, {}, {"decode", "output-failed", "Could not fit provider pixels"}};
+    return {source, std::move(image), {}};
 }
-} // namespace
 
-std::function<void()> requestProvider(QQmlEngine *engine, const QUrl &url, DecodeSpec spec,
-                                      QObject *receiver, ImagePipeline::Done done) {
-    auto *provider =
-        engine ? dynamic_cast<QQuickImageProvider *>(engine->imageProvider(url.host())) : nullptr;
+std::function<void()> snapshotProvider(QQmlEngine *engine, const QUrl &url, QObject *receiver,
+                                       std::function<void(ProviderSnapshot)> done) {
+    auto *app = QCoreApplication::instance();
+    auto *provider = app && engine && QThread::currentThread() == app->thread() &&
+                             engine->thread() == app->thread()
+                         ? dynamic_cast<QQuickImageProvider *>(engine->imageProvider(url.host()))
+                         : nullptr;
     if (!provider || !url.isValid() || url.hasFragment()) {
-        done({}, {"admission", "invalid-source", "No matching application image provider"});
+        done({{}, {}, {"admission", "invalid-source", "No matching application image provider"}});
         return {};
     }
     auto id = url.path(QUrl::FullyEncoded).mid(1);
@@ -61,50 +76,56 @@ std::function<void()> requestProvider(QQmlEngine *engine, const QUrl &url, Decod
         id += '?' + url.query(QUrl::FullyEncoded);
     QImage image;
     QSize original;
+    const QSize nativeSize;
     switch (provider->imageType()) {
     case QQmlImageProviderBase::Image:
-        image = provider->requestImage(id, &original, spec.bounds);
+        image = provider->requestImage(id, &original, nativeSize);
         break;
     case QQmlImageProviderBase::Pixmap:
-        image = provider->requestPixmap(id, &original, spec.bounds).toImage();
+        image = provider->requestPixmap(id, &original, nativeSize).toImage();
         break;
     case QQmlImageProviderBase::Texture: {
         const auto factory = std::unique_ptr<QQuickTextureFactory>(
-            provider->requestTexture(id, &original, spec.bounds));
+            provider->requestTexture(id, &original, nativeSize));
         if (factory)
             image = factory->image();
         break;
     }
     case QQmlImageProviderBase::ImageResponse: {
         auto *async = dynamic_cast<QQuickAsyncImageProvider *>(provider);
-        auto *response = async ? async->requestImageResponse(id, spec.bounds) : nullptr;
+        const QPointer guard(receiver);
+        auto *response = async ? async->requestImageResponse(id, nativeSize) : nullptr;
         if (!response)
             break;
-        auto interest = std::make_shared<ImagePipeline::Done>(std::move(done));
+        auto interest = std::make_shared<std::function<void(ProviderSnapshot)>>(std::move(done));
         QObject::connect(
-            response, &QQuickImageResponse::finished, &imagePipeline(),
-            [response, receiver = QPointer(receiver), spec, weak = std::weak_ptr(interest)] {
+            response, &QQuickImageResponse::finished, app,
+            [response, receiver = guard, weak = std::weak_ptr(interest)] {
                 response->deleteLater();
-                const auto callback = weak.lock();
+                const auto state = weak.lock();
+                if (!state)
+                    return;
+                const auto callback = std::exchange(*state, {});
                 if (!receiver || !callback)
                     return;
                 const auto factory =
                     std::unique_ptr<QQuickTextureFactory>(response->textureFactory());
                 if (!factory) {
-                    (*callback)({}, {"open", "unreadable", response->errorString()});
+                    callback({{}, {}, {"open", "unreadable", response->errorString()}});
                     return;
                 }
-                deliver(factory->image(), factory->textureSize(), spec, *callback);
+                callback(snapshot(factory->image(), factory->textureSize()));
             },
-            Qt::QueuedConnection);
+            Qt::SingleShotConnection);
         return [response = QPointer(response), interest = std::move(interest)]() mutable {
-            if (interest.use_count() == 1 && response)
-                response->cancel();
+            const bool pending = interest && bool(*interest);
             interest.reset();
+            if (pending && response)
+                response->cancel();
         };
     }
     }
-    deliver(std::move(image), original, spec, done);
+    done(snapshot(std::move(image), original));
     return {};
 }
 } // namespace Imv

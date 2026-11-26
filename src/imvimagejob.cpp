@@ -2,10 +2,12 @@
 #include "imvimagejob.h"
 #include "private/decode-client.h"
 #include "private/export.h"
+#include "private/image-provider.h"
 
 #include <QDir>
 #include <QHash>
 #include <QPointer>
+#include <QQmlEngine>
 #include <QThreadPool>
 #include <limits>
 #include <mutex>
@@ -24,6 +26,8 @@ struct ImvImageJob::State {
         Method method;
         QString destination, format;
         std::atomic<Publication> phase{Publication::Staging};
+        std::function<void()> cancelProvider;
+        bool awaitingProvider = false;
     };
 
     explicit State(ImvImageJob &owner) : q(owner), dispatch(std::make_shared<Dispatch>()) {
@@ -40,6 +44,8 @@ struct ImvImageJob::State {
             job->phase.compare_exchange_strong(expected, Publication::Cancelled);
             if (job->poolId > 0 && pool)
                 pool->cancel(job->poolId);
+            if (auto cancel = std::exchange(job->cancelProvider, {}))
+                cancel();
         }
     }
 
@@ -65,12 +71,13 @@ struct ImvImageJob::State {
                 path = QDir::current().absoluteFilePath(path);
             }
         }
-        if (!pool)
-            pool = &decoderPool();
-        if (!argumentError && !pool->available())
-            return -2;
-        auto source =
-            argumentError ? OpenedSource{{}, {}, std::move(argumentError)} : openSource(url);
+        const bool fromProvider = !argumentError && url.scheme() == "image";
+        if (!argumentError && !fromProvider) {
+            if (!pool)
+                pool = &decoderPool();
+            if (!pool->available())
+                return -2;
+        }
         auto job = std::shared_ptr<Active>(
             new Active{++lastId, 0, method, std::move(path), std::move(format)});
         const auto failLater = [this, &job](Failure error) {
@@ -79,11 +86,39 @@ struct ImvImageJob::State {
                 &q, [this, job, error = std::move(error)] { finish(job, asMap(error)); },
                 Qt::QueuedConnection);
         };
+        if (argumentError) {
+            failLater(std::move(argumentError));
+            return job->id;
+        }
+        const QPointer<ImvImageJob> receiver(&q);
+        if (fromProvider) {
+            job->awaitingProvider = true;
+            jobs.insert(job->id, job);
+            const auto captured = [receiver, weak = std::weak_ptr(job),
+                                   spec](ProviderSnapshot snapshot) {
+                const auto active = weak.lock();
+                if (!receiver || !active)
+                    return;
+                QMetaObject::invokeMethod(
+                    receiver,
+                    [receiver, active, spec, snapshot = std::move(snapshot)] {
+                        if (receiver && active->phase.load() != Publication::Cancelled)
+                            receiver->d->decoded(active, rasterizeProvider(snapshot, spec));
+                    },
+                    Qt::QueuedConnection);
+            };
+            auto cancel = snapshotProvider(qmlEngine(&q), url, &q, captured);
+            if (receiver && job->phase.load() != Publication::Cancelled)
+                job->cancelProvider = std::move(cancel);
+            else if (cancel)
+                cancel();
+            return job->id;
+        }
+        auto source = openSource(url);
         if (source.error) {
             failLater(std::move(source.error));
             return job->id;
         }
-        const QPointer<ImvImageJob> receiver(&q);
         const auto ticket =
             submitDecode(*pool, std::move(source.fd), spec, [receiver, job](Decoded image) mutable {
                 if (receiver)
@@ -110,6 +145,8 @@ struct ImvImageJob::State {
 
     void decoded(const std::shared_ptr<Active> &job, Decoded image) {
         job->poolId = 0;
+        job->awaitingProvider = false;
+        job->cancelProvider = {};
         if (job->phase.load() == Publication::Cancelled || image.error) {
             finish(job, asMap(image.error));
             return;
@@ -176,6 +213,14 @@ bool ImvImageJob::cancel(int id) {
         return false;
     if (job->poolId > 0 && d->pool)
         d->pool->cancel(job->poolId);
+    else if (job->awaitingProvider) {
+        const QPointer guard(this);
+        if (auto cancel = std::exchange(job->cancelProvider, {}))
+            cancel();
+        if (guard)
+            QMetaObject::invokeMethod(
+                this, [this, job] { d->finish(job, {}); }, Qt::QueuedConnection);
+    }
     return true;
 }
 

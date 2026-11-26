@@ -2,12 +2,14 @@
 #include "imvimage.h"
 
 #include "private/image-node.h"
+#include "private/image-pipeline.h"
 #include "private/image-provider.h"
 #include "private/playback.h"
 #include <QQmlContext>
 #include <QQmlEngine>
 #include <QQuickWindow>
 #include <cmath>
+#include <optional>
 
 namespace Imv {
 namespace {
@@ -23,6 +25,8 @@ struct ImvImage::State {
     QUrl url;
     QByteArray bytes;
     bool hasBytes = false;
+    std::shared_ptr<std::optional<ProviderSnapshot>> provider;
+    std::function<void()> cancelProvider;
     FillMode fill = Contain;
     Mask mask = NoMask;
     qreal radius = 0;
@@ -41,12 +45,14 @@ struct ImvImage::State {
     std::unique_ptr<Playback> playback;
     QMetaObject::Connection windowVisibility;
     ImagePipeline::Interest interest;
-    std::function<void()> cancelProvider;
 
     void revoke() {
         ++generation;
         playback.reset();
         interest.reset();
+    }
+
+    void cancelSnapshot() {
         if (auto cancel = std::exchange(cancelProvider, {}))
             cancel();
     }
@@ -66,7 +72,11 @@ ImvImage::ImvImage(QQuickItem *parent) : QQuickItem(parent), d(std::make_unique<
     connect(this, &QQuickItem::visibleChanged, this, &ImvImage::syncPlayback);
 }
 
-ImvImage::~ImvImage() { d->revoke(); }
+ImvImage::~ImvImage() {
+    d->revoke();
+    d->provider.reset();
+    d->cancelSnapshot();
+}
 
 QUrl ImvImage::source() const { return d->url; }
 void ImvImage::setSource(const QUrl &source) {
@@ -81,8 +91,30 @@ void ImvImage::setSource(const QUrl &source) {
     d->bytes.clear();
     d->url = resolved;
     const QPointer guard(this);
+    const auto pending = resolved.scheme() == "image"
+                             ? std::make_shared<std::optional<ProviderSnapshot>>()
+                             : nullptr;
+    d->provider = pending;
+    d->cancelSnapshot();
+    if (!guard || d->url != resolved || d->provider != pending || d->hasBytes)
+        return;
+    if (pending) {
+        auto cancel = snapshotProvider(qmlEngine(this), resolved, this,
+                                       [guard, pending](ProviderSnapshot value) {
+                                           if (!guard || guard->d->provider != pending)
+                                               return;
+                                           pending->emplace(std::move(value));
+                                           guard->polish();
+                                       });
+        if (!guard || d->provider != pending) {
+            if (cancel)
+                cancel();
+            return;
+        }
+        d->cancelProvider = std::move(cancel);
+    }
     resetRequest(true);
-    if (guard)
+    if (guard && d->url == resolved && d->provider == pending && !d->hasBytes)
         emit sourceChanged();
 }
 
@@ -93,6 +125,10 @@ void ImvImage::setBytes(const QByteArray &bytes) {
     d->bytes.detach();
     d->url.clear();
     const QPointer guard(this);
+    d->provider.reset();
+    d->cancelSnapshot();
+    if (!guard || !d->hasBytes)
+        return;
     resetRequest(true);
     if (guard && urlChanged)
         emit sourceChanged();
@@ -218,6 +254,8 @@ void ImvImage::geometryChange(const QRectF &now, const QRectF &before) {
 void ImvImage::updatePolish() {
     if (!d->hasBytes && d->url.isEmpty())
         return;
+    if (d->provider && !*d->provider)
+        return;
     if (!window() || !std::isfinite(width()) || !std::isfinite(height()) || width() <= 0 ||
         height() <= 0) {
         if (!d->requested.isEmpty()) {
@@ -242,8 +280,8 @@ void ImvImage::updatePolish() {
         scale = DecodeSpec::Cover;
     else if (d->fill == Stretch)
         scale = DecodeSpec::Stretch;
-    const DecodeSpec spec{d->url.scheme() == "image" ? DecodeSpec::Pixels : DecodeSpec::Animation,
-                          bounds, scale, 0, d->videoPosition};
+    const DecodeSpec spec{d->provider ? DecodeSpec::Pixels : DecodeSpec::Animation, bounds, scale,
+                          0, d->videoPosition};
     const auto generation = d->generation;
     const auto guard = QPointer(this);
     setOutcome(Loading);
@@ -279,12 +317,14 @@ void ImvImage::updatePolish() {
     };
     if (!spec.valid()) {
         done({}, {"admission", "invalid-size", "Physical size exceeds the output edge limit"});
-    } else if (d->url.scheme() == "image") {
-        auto cancel = requestProvider(qmlEngine(this), d->url, spec, this, done);
-        if (guard && d->generation == generation)
-            d->cancelProvider = std::move(cancel);
-        else if (cancel)
-            cancel();
+    } else if (d->provider) {
+        auto decoded = rasterizeProvider(**d->provider, spec);
+        if (decoded.error)
+            done({}, std::move(decoded.error));
+        else
+            done(
+                imagePipeline().providerAsset(std::move(decoded.pixels), decoded.source.size, spec),
+                {});
     } else {
         auto source = d->hasBytes ? openSource(d->bytes) : openSource(d->url);
         d->interest = imagePipeline().request(std::move(source), spec, done);

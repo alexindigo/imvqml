@@ -103,6 +103,7 @@ struct Pool::State {
         Clock::time_point deadline;
         std::optional<Frame> pending;
         Completion completion;
+        Validator validator;
     };
     struct Slot {
         std::unique_ptr<Child> child;
@@ -212,7 +213,8 @@ struct Pool::State {
             return;
         }
         if (status != Io::Ok || !slot.work || slot.work->pending || frame.kind != Kind::Reply ||
-            frame.serial != slot.work->serial) {
+            frame.serial != slot.work->serial ||
+            (slot.work->validator && !slot.work->validator(frame))) {
             fail(slot, failure("protocol-error", "Invalid or unmatched decoder response"));
             return;
         }
@@ -289,7 +291,8 @@ Pool::Pool(Factory factory, int capacity, unsigned maxReuse, QObject *parent)
 
 Pool::~Pool() = default;
 
-Pool::Ticket Pool::submit(Frame request, std::chrono::milliseconds budget, Completion completion) {
+Pool::Ticket Pool::submit(Frame request, std::chrono::milliseconds budget, Completion completion,
+                          Validator validator) {
     if (request.kind != Kind::Request || request.serial || request.body.size() > MaxBody ||
         request.fds.size() > MaxFds || budget.count() <= 0 ||
         budget.count() > std::numeric_limits<int>::max() || !completion)
@@ -302,8 +305,8 @@ Pool::Ticket Pool::submit(Frame request, std::chrono::milliseconds budget, Compl
     const int id = ++d->lastId;
     request.serial = ++d->lastSerial;
     const auto serial = request.serial;
-    slot->work.emplace(
-        State::Work{id, serial, Clock::now() + budget, std::move(request), std::move(completion)});
+    slot->work.emplace(State::Work{id, serial, Clock::now() + budget, std::move(request),
+                                   std::move(completion), std::move(validator)});
     slot->timer.start(budget);
     if (!slot->child)
         d->launch(*slot);

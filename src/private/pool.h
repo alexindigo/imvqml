@@ -46,6 +46,7 @@ class Pool : public QObject {
     Q_OBJECT
 public:
     using Completion = std::function<void(JobReply)>;
+    using Validator = std::function<bool(const Frame &)>;
     using Factory = std::function<std::unique_ptr<Child>()>;
     enum class Admission { Accepted, Busy, Invalid, Exhausted };
     struct Ticket {
@@ -58,7 +59,8 @@ public:
     ~Pool() override;
 
     // GUI-affine, local admission only. The callback cannot run inline.
-    Ticket submit(Frame request, std::chrono::milliseconds budget, Completion completion);
+    Ticket submit(Frame request, std::chrono::milliseconds budget, Completion completion,
+                  Validator validator = {});
     bool cancel(int id);
     bool available() const;
 

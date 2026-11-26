@@ -9,7 +9,10 @@ endif()
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 include(CTest)
-find_package(Qt6 6.8 REQUIRED COMPONENTS Core Qml)
+find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Qml)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(VIPS REQUIRED IMPORTED_TARGET vips>=8.14)
+pkg_check_modules(WEBP REQUIRED IMPORTED_TARGET libwebp)
 qt_standard_project_setup(REQUIRES 6.8)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -20,13 +23,14 @@ set(stage "${PROJECT_BINARY_DIR}/out")
 file(RELATIVE_PATH decoder_from_lib "/prefix/${CMAKE_INSTALL_LIBDIR}"
     "/prefix/${CMAKE_INSTALL_LIBEXECDIR}/imvqml-decoder")
 
-add_library(imv-wire STATIC src/private/wire.cpp)
+add_library(imv-wire STATIC src/private/wire.cpp src/private/decode-wire.cpp)
 target_include_directories(imv-wire PUBLIC src/private)
 target_link_libraries(imv-wire PUBLIC Qt6::Core)
 set_target_properties(imv-wire PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-add_executable(imvqml-decoder src/decoder.cpp)
-target_link_libraries(imvqml-decoder PRIVATE imv-wire)
+add_executable(imvqml-decoder src/decoder.cpp src/vips-decode.cpp)
+target_compile_definitions(imvqml-decoder PRIVATE QT_NO_KEYWORDS)
+target_link_libraries(imvqml-decoder PRIVATE imv-wire PkgConfig::VIPS)
 set_target_properties(imvqml-decoder PROPERTIES RUNTIME_OUTPUT_DIRECTORY
     "${stage}/${CMAKE_INSTALL_LIBEXECDIR}")
 
@@ -36,13 +40,13 @@ qt_add_qml_module(imvqml URI ImvQml VERSION 1.0
     NO_PLUGIN_OPTIONAL
     OUTPUT_DIRECTORY "${stage}/${qml_dir}/ImvQml"
     SOURCES src/include/imvqml/imvimagejob.h src/imvimagejob.cpp src/private/helper.cpp
-        src/private/pool.cpp src/private/pool.h)
+        src/private/pool.cpp src/private/pool.h src/private/decode-client.cpp src/private/export.cpp)
 target_include_directories(imvqml PUBLIC
     "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/include>"
     "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
     PRIVATE src/include/imvqml)
 target_link_libraries(imvqml PUBLIC Qt6::Core Qt6::QmlIntegration
-    PRIVATE Qt6::Qml imv-wire ${CMAKE_DL_LIBS})
+    PRIVATE Qt6::Gui Qt6::Qml imv-wire PkgConfig::WEBP ${CMAKE_DL_LIBS})
 target_compile_definitions(imvqml PRIVATE IMV_DECODER_FROM_LIB="${decoder_from_lib}")
 set_target_properties(imvqml PROPERTIES VERSION "${PROJECT_VERSION}" SOVERSION 0
     LIBRARY_OUTPUT_DIRECTORY "${stage}/${CMAKE_INSTALL_LIBDIR}")

@@ -1,0 +1,195 @@
+// SPDX-License-Identifier: LGPL-3.0-only
+#include "decode-client.h"
+#include <QCoreApplication>
+#include <QCryptographicHash>
+#include <QFile>
+#include <QPointer>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+
+namespace Imv {
+namespace {
+OpenedSource fail(QString stage, QString code, QString detail) {
+    return {{}, {}, {std::move(stage), std::move(code), std::move(detail)}};
+}
+
+struct Mapping {
+    void *start;
+    qint64 bytes;
+    static void release(void *data) {
+        auto *m = static_cast<Mapping *>(data);
+        ::munmap(m->start, m->bytes);
+        delete m;
+    }
+};
+
+bool sealedOutput(int fd, qint64 bytes) {
+    struct stat info{};
+    const int seals = ::fcntl(fd, F_GET_SEALS);
+    return bytes > 0 && seals >= 0 && (seals & MemfdSeals) == MemfdSeals && !::fstat(fd, &info) &&
+           S_ISREG(info.st_mode) && info.st_size == bytes;
+}
+
+Failure translate(DecodeCode code, QString detail) {
+    switch (code) {
+    case DecodeCode::Unreadable:
+        return {"open", "unreadable", detail};
+    case DecodeCode::Unsupported:
+        return {"inspect", "unsupported-format", detail};
+    case DecodeCode::InvalidHeader:
+        return {"inspect", "invalid-image", detail};
+    case DecodeCode::SourceLimit:
+        return {"admission", "too-large", detail};
+    case DecodeCode::PixelLimit:
+        return {"inspect", "too-large", detail};
+    case DecodeCode::Decode:
+        return {"decode", "invalid-image", detail};
+    case DecodeCode::Output:
+        return {"decode", "output-failed", detail};
+    case DecodeCode::Ok:
+        return {};
+    }
+    Q_UNREACHABLE();
+}
+} // namespace
+
+QString localPath(const QUrl &url) {
+    if (!url.isValid() || !url.host().isEmpty() || url.hasQuery() || url.hasFragment())
+        return {};
+    const auto path = url.isLocalFile()        ? url.toLocalFile()
+                      : url.scheme().isEmpty() ? url.path()
+                                               : QString{};
+    return path.contains(QChar::Null) ? QString{} : path;
+}
+
+OpenedSource openSource(const QUrl &url) {
+    if (url.scheme() == "data") {
+        if (!url.isValid() || url.hasFragment())
+            return fail("admission", "invalid-source", "Malformed data URL");
+        if (url.toString().size() > 4 * MaxSourceBytes + 1024)
+            return fail("admission", "too-large", "Encoded source exceeds the data URL limit");
+        const auto data = url.toEncoded(QUrl::RemoveScheme);
+        const auto comma = data.indexOf(',');
+        if (comma < 0 || comma > 1024)
+            return fail("admission", "invalid-source", "Data URL lacks a bounded metadata field");
+        const QByteArray payload = QByteArray::fromPercentEncoding(data.sliced(comma + 1));
+        if (!data.first(comma).endsWith(";base64"))
+            return openSource(payload);
+        if (payload.size() > (MaxSourceBytes + 2) / 3 * 4)
+            return fail("admission", "too-large", "Base64 source exceeds the source byte limit");
+        const auto decoded =
+            QByteArray::fromBase64Encoding(payload, QByteArray::AbortOnBase64DecodingErrors);
+        if (!decoded)
+            return fail("admission", "invalid-source", "Malformed base64 data URL");
+        return openSource(decoded.decoded);
+    }
+    const auto path = localPath(url);
+    if (path.isEmpty())
+        return fail("admission", "invalid-source",
+                    "Only local paths, file URLs and data URLs are supported here");
+    Fd fd(::open(QFile::encodeName(path).constData(), O_RDONLY | O_CLOEXEC | O_NONBLOCK));
+    struct stat info{};
+    if (!fd || ::fstat(fd.get(), &info) != 0 || !S_ISREG(info.st_mode))
+        return fail("open", "unreadable", "Cannot open a readable regular file");
+    if (info.st_size > MaxSourceBytes)
+        return fail("admission", "too-large", "Source exceeds 256 MiB");
+    const auto number = [](auto value) { return QByteArray::number(value); };
+    auto identity = "file/" + number(info.st_dev) + '/' + number(info.st_ino) + '/' +
+                    number(info.st_size) + '/' + number(info.st_mtim.tv_sec) + '/' +
+                    number(info.st_mtim.tv_nsec);
+    return {std::move(fd), std::move(identity), {}};
+}
+
+OpenedSource openSource(const QByteArray &bytes) {
+    if (bytes.size() > MaxSourceBytes)
+        return fail("admission", "too-large", "Source exceeds 256 MiB");
+    auto fd = newMemfd("imvqml-source");
+    if (!fd || !writeAll(fd.get(), bytes.constData(), bytes.size()) ||
+        ::fcntl(fd.get(), F_ADD_SEALS, MemfdSeals) < 0)
+        return fail("open", "unreadable", "Could not materialize the immutable byte source");
+    return {std::move(fd),
+            "bytes/" + QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex(),
+            {}};
+}
+
+Pool &decoderPool() {
+    static QPointer<Pool> pool;
+    if (!pool)
+        pool = new Pool(QCoreApplication::instance());
+    return *pool;
+}
+
+Pool::Ticket submitDecode(Pool &pool, Fd input, DecodeSpec spec,
+                          std::function<void(Decoded)> done) {
+    if (!input || !spec.valid())
+        return {Pool::Admission::Invalid};
+    Frame frame{Kind::Request, 0, encode(spec), {}};
+    frame.fds.emplace_back(std::move(input));
+    auto output = std::make_shared<Fd>();
+    if (spec.mode == DecodeSpec::Pixels) {
+        *output = newMemfd("imvqml-pixels");
+        if (!*output)
+            return {Pool::Admission::Invalid};
+        Fd sendFd(::fcntl(output->get(), F_DUPFD_CLOEXEC, 0));
+        if (!sendFd)
+            return {Pool::Admission::Invalid};
+        frame.fds.emplace_back(std::move(sendFd));
+    }
+    return pool.submit(
+        std::move(frame), std::chrono::milliseconds(StillDeadlineMs),
+        [done = std::move(done), output](JobReply reply) {
+            if (reply.error) {
+                done({{}, {}, std::move(reply.error)});
+                return;
+            }
+            DecodeReport report;
+            if (!decode(reply.frame.body, report)) {
+                done({{}, {}, {"helper", "protocol-error", "Invalid decoder response"}});
+                return;
+            }
+            if (report.code != DecodeCode::Ok) {
+                done({{}, {}, translate(report.code, std::move(report.detail))});
+                return;
+            }
+            QImage image;
+            if (*output) {
+                const auto bytes = rgbaBytes(report.output);
+                auto *pixels = ::mmap(nullptr, bytes, PROT_READ, MAP_SHARED, output->get(), 0);
+                if (pixels == MAP_FAILED) {
+                    done({{}, {}, {"decode", "output-failed", "Could not map sealed pixels"}});
+                    return;
+                }
+                image =
+                    QImage(static_cast<const uchar *>(pixels), report.output.width(),
+                           report.output.height(), report.output.width() * 4,
+                           QImage::Format_RGBA8888, Mapping::release, new Mapping{pixels, bytes});
+            }
+            done({std::move(report.source), std::move(image), {}});
+        },
+        [spec, output](const Frame &response) {
+            DecodeReport report;
+            if (!response.fds.empty() || !decode(response.body, report))
+                return false;
+            if (report.code != DecodeCode::Ok)
+                return true;
+            if (spec.mode == DecodeSpec::Inspect)
+                return report.output == QSize(0, 0);
+            return report.output.width() <= spec.bounds.width() &&
+                   report.output.height() <= spec.bounds.height() &&
+                   sealedOutput(output->get(), rgbaBytes(report.output));
+        });
+}
+
+QVariantMap asMap(const SourceInfo &source) {
+    return {{"format", source.format},
+            {"width", source.size.width()},
+            {"height", source.size.height()},
+            {"frames", source.frames},
+            {"loop", source.loop}};
+}
+
+QVariantMap asMap(const Failure &failure) {
+    return {{"stage", failure.stage}, {"code", failure.code}, {"detail", failure.detail}};
+}
+} // namespace Imv

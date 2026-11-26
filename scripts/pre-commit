@@ -13,6 +13,11 @@ if ! cmp -s .clang-format <(git show :.clang-format); then
     exit 1
 fi
 for file in "${files[@]}"; do
+    if [[ $file == tests/vendor/qoi.h ]]; then
+        # Verify the pinned reference header (one blank-line whitespace cleanup).
+        git show ":$file" | sha256sum --check --status <(printf '%s  -\n' '5afc8f0959ff88d7e09faf58ea0b7472eeed6a0fd096fca680afd696168aa3a2')
+        continue
+    fi
     git show ":$file" | "${IMVQML_CLANG_FORMAT:-clang-format}" --style=file:.clang-format \
         --assume-filename="$file" --dry-run --Werror
 done

@@ -1,7 +1,8 @@
 # Verification (guest only)
 
 Run in the owned `imvqml-dev` virtual machine on ark, with Qt Test and
-bubblewrap installed for `BUILD_TESTING=ON`. `TMPDIR` below is on the guest
+bubblewrap, Python 3, libzstd and ImageMagick with the listed codec writers
+installed for `BUILD_TESTING=ON`. `TMPDIR` below is on the guest
 disk, outside both the original source and build trees:
 
 ```sh
@@ -15,9 +16,12 @@ env -u DISPLAY -u WAYLAND_DISPLAY ctest --test-dir build --output-on-failure
 `installed-prefix` builds external C++ and QML consumers against a moved
 install prefix. Bubblewrap overlays both original trees with empty read-only
 directories; the QML consumer checks the relocated paths in `/proc/self/maps`.
-`installed-scaffold-outcome` also asserts the typed, queued scaffold result.
-`installed-pixels-red` is an opt-in acceptance check, not a committed passing
-test in the scaffold. Configure with `-DIMV_ENABLE_PIXEL_ACCEPTANCE=ON`, run
-`ctest --test-dir build --output-on-failure -R '^installed-pixels-red$'`,
-and expect `not-implemented` instead of the two expected RGBA pixels. Reset
-the option to `OFF` for normal scaffold verification.
+`installed-sample` asserts the two expected RGBA pixels under the same
+isolation. `jobs` uses generated fixture files and no display.
+
+To rerun the persistent-format measurement inside the guest niri session,
+use `QT_QPA_PLATFORM=wayland build/tests/imv-store-benchmark` with the
+guest's `WAYLAND_DISPLAY` and `XDG_RUNTIME_DIR` set. The benchmark checks
+each codec's exact RGBA round trip before reading the encoded files and
+uploading to OpenGL textures. The cold lane advises eviction from the guest
+page cache, not any virtual-disk or host cache.

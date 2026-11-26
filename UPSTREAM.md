@@ -8,5 +8,18 @@
   `QProcess` provides nonblocking event-loop reaping; the private pool keeps
   each live process object out of synchronous destruction.
 - The Linux helper caps address space at 1 GiB (`RLIMIT_AS`) and disables
-  core dumps. No decoder or general OS sandbox has been added yet.
-- No libvips, loaders or libmpv are linked by this scaffold.
+  core dumps. It is not a general OS sandbox.
+- libvips 8.18.7 verified, with JPEG XL via libjxl 0.12.0, HEIF/AVIF via
+  libheif 1.23.6, SVG via librsvg, GIF via nsgif, and distro PNG, JPEG, WebP
+  and TIFF loaders. `VIPS_OPERATION_UNTRUSTED` means the upstream operation
+  depends on code not treated as hardened for untrusted input. libvips marks
+  its external-libjxl JPEG XL loader (and its librsvg SVG loader) this way.
+  The exact source operations are enabled by the approved allow-list in the
+  helper only; their filename/buffer variants remain blocked. This does not
+  change upstream's security classification or remove the decoder's limits.
+- libwebp encodes trusted normalized RGBA for optional lossless file export;
+  source decoding stays in the helper. No libmpv linkage yet.
+- The store measurement uses the MIT-licensed QOI reference header from
+  phoboslab/qoi commit `ffb2d2cb74a1de60819b21b939f7209aa53e91c1`, in
+  `tests/vendor/qoi.h` with one blank line's trailing tabs removed. It is
+  not part of the library.

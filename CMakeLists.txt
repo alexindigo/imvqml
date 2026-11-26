@@ -35,7 +35,8 @@ add_library(imvqml::imvqml ALIAS imvqml)
 qt_add_qml_module(imvqml URI ImvQml VERSION 1.0
     NO_PLUGIN_OPTIONAL
     OUTPUT_DIRECTORY "${stage}/${qml_dir}/ImvQml"
-    SOURCES src/include/imvqml/imvimagejob.h src/imvimagejob.cpp src/private/helper.cpp)
+    SOURCES src/include/imvqml/imvimagejob.h src/imvimagejob.cpp src/private/helper.cpp
+        src/private/pool.cpp src/private/pool.h)
 target_include_directories(imvqml PUBLIC
     "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/include>"
     "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"

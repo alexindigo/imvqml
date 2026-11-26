@@ -11,3 +11,8 @@ URL and positive dimensions, returning a positive ticket, or rejects
 immediately with `-1`. Each ticket gets one queued `finished(id, result)`
 while the receiver exists. The scaffold reports `stage: "decode"`,
 `code: "not-implemented"` and a diagnostic `detail`; it does not decode.
+
+The process pool is private. Its capacity pressure is retryable admission
+(`Busy`), not a terminal error. Process outcomes carry `stage: "helper"`
+and one of `deadline`, `helper-crashed`, `protocol-error`, or `cancelled`.
+Public decode jobs will add these outcomes when connected to the pool.

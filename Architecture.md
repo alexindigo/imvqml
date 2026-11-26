@@ -15,3 +15,15 @@ Received descriptors are close-on-exec and have move-only owners even when a
 packet is rejected. The helper inherits exactly one protocol endpoint (fd 3)
 and exits on EOF. The probe helper echoes opaque binary and descriptors;
 there is no codec in this unit.
+
+The private GUI-affine pool owns two reusable children by default, with at
+most 32 completed requests per child. It exposes a factory of injectable
+children implementing the same transport and retirement signals. Every local
+positive ticket has an independent wire serial and one terminal owner, consumed
+before queuing delivery. Nonblocking notifiers are armed only for relevant I/O.
+One precise timer per admitted slot enforces the wall-clock budget; a reply
+drained after the deadline cannot revive an expired ticket. Cancel, timeout,
+garbage and crash all converge on the same terminal ledger. Capacity remains
+occupied through child reaping if a child must stop, and release is delivered
+after the terminal callback. Pool destruction closes sockets and requests child
+kill, but a detached retirement receiver owns the process until Qt reaps it.

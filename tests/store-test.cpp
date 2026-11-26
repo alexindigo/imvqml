@@ -94,6 +94,30 @@ private slots:
         QCOMPARE(bits.st_mode & 0777u, 0600u);
     }
 
+    void thumbnailBurst() {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        qputenv("XDG_CACHE_HOME", QFile::encodeName(directory.path()));
+        ImvCache policy;
+        QSignalSpy done(&policy, &ImvCache::thumbnailFinished);
+        QSet<int> ids;
+        for (int i = 0; i < 50; ++i) {
+            const auto path = directory.filePath(QString::number(i) + ".png");
+            QVERIFY(QFile::copy(IMV_FIXTURES "/palette.png", path));
+            ids.insert(policy.exportThumbnail(QUrl::fromLocalFile(path), 128));
+        }
+        QTRY_COMPARE_WITH_TIMEOUT(done.size(), 50, 15000);
+        for (const auto &completion : done) {
+            QVERIFY(ids.remove(completion[0].toInt()));
+            const auto result = completion[1].toMap();
+            QVERIFY2(result.value("stage") == "complete",
+                     qPrintable(result.value("code").toString()));
+            const auto path = result.value("destination").toUrl().toLocalFile();
+            QCOMPARE(QImage(path).pixelColor(16, 16), QColor(Qt::red));
+        }
+        QVERIFY(ids.isEmpty());
+    }
+
     void contendedInvalidation_data() {
         QTest::addColumn<bool>("all");
         QTest::newRow("single source") << false;

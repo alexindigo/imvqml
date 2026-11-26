@@ -6,6 +6,7 @@
 #include <QProcess>
 #include <QSocketNotifier>
 #include <QTimer>
+#include <algorithm>
 #include <limits>
 #include <optional>
 
@@ -141,9 +142,13 @@ struct Pool::State {
         }
     }
 
+    static bool isIdle(const Slot &slot) {
+        return !slot.work && !slot.stopping && (!slot.child || !slot.child->retired());
+    }
+
     Slot *idle() const {
         for (const auto &slot : children) {
-            if (!slot->work && !slot->stopping && (!slot->child || !slot->child->retired()))
+            if (isIdle(*slot))
                 return slot.get();
         }
         return nullptr;
@@ -328,6 +333,11 @@ Pool::Admission Pool::capacity() const {
     if (d->lastId == std::numeric_limits<int>::max())
         return Admission::Exhausted;
     return d->idle() ? Admission::Accepted : Admission::Busy;
+}
+
+int Pool::idleSlots() const {
+    return std::count_if(d->children.begin(), d->children.end(),
+                         [](const auto &slot) { return State::isIdle(*slot); });
 }
 
 std::unique_ptr<Child> processChild(const QString &executable) {

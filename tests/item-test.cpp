@@ -26,6 +26,7 @@ private slots:
     void firstFramePreview();
     void textureOutcome();
     void idleBatchBacking();
+    void burst();
     void animation();
     void cachePolicy();
 };
@@ -590,6 +591,33 @@ void ItemTest::idleBatchBacking() {
     items.clear();
     for (const auto &mapping : mappings)
         QTRY_VERIFY_WITH_TIMEOUT(mapping.expired(), 1000);
+}
+
+void ItemTest::burst() {
+    QQuickWindow window;
+    window.resize(320, 160);
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    std::vector<std::unique_ptr<Imv::ImvImage>> items;
+    for (int i = 0; i < 50; ++i) {
+        const auto path = dir.filePath(QString::number(i) + ".png");
+        QVERIFY(QFile::copy(IMV_FIXTURES "/palette.png", path));
+        auto item = std::make_unique<Imv::ImvImage>(window.contentItem());
+        item->setPosition({qreal(i % 10 * 32), qreal(i / 10 * 32)});
+        item->setSize({32, 32});
+        item->setSource(QUrl::fromLocalFile(path));
+        items.push_back(std::move(item));
+    }
+    window.show();
+    QTRY_VERIFY_WITH_TIMEOUT(std::ranges::all_of(items,
+                                                 [](const auto &item) {
+                                                     return item->status() ==
+                                                                Imv::ImvImage::Ready ||
+                                                            item->status() == Imv::ImvImage::Failed;
+                                                 }),
+                             15000);
+    for (const auto &item : items)
+        QVERIFY2(item->status() == Imv::ImvImage::Ready, qPrintable(item->errorCode()));
 }
 
 void ItemTest::animation() {

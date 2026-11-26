@@ -2,8 +2,11 @@
 #pragma once
 
 #include "decode-client.h"
+#include <QDeadlineTimer>
+#include <QList>
 #include <QSemaphore>
 #include <QThreadPool>
+#include <QTimer>
 
 namespace Imv {
 
@@ -30,13 +33,28 @@ public:
     bool enabled() const { return m_enabled; }
     quint64 epoch() const { return m_epoch; }
     void thumbnail(QString path, struct stat revision, QImage pixels, SourceInfo info, int size,
-                   std::function<void(Failure, QUrl)> done);
+                   std::weak_ptr<void> interest, std::function<void(Failure, QUrl)> done);
 
 private:
     struct Worker;
+    struct Thumbnail {
+        QString path;
+        struct stat revision;
+        QImage pixels;
+        SourceInfo info;
+        int size;
+        std::weak_ptr<void> interest;
+        std::function<void(Failure, QUrl)> done;
+        QDeadlineTimer deadline;
+    };
     std::unique_ptr<Worker> d;
     QSemaphore m_pixelWrites{2};
     QThreadPool m_worker;
+    QList<Thumbnail> m_thumbnails;
+    QTimer m_thumbnailDeadline;
+    bool m_writingThumbnail = false;
+    void pumpThumbnails();
+    void finishThumbnail(Thumbnail request, Failure failure, QUrl output = {});
     void queueLookup(std::function<std::shared_ptr<const Fd>()> source, DecodeSpec spec,
                      std::function<void(Lookup)> done);
     void queueInvalidation(std::function<OpenedSource()> source);

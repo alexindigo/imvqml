@@ -14,25 +14,35 @@
 #include <unistd.h>
 
 namespace Imv {
+class SourceWorker : public QObject {
+    Q_OBJECT
+public:
+    explicit SourceWorker(QObject *parent) : QObject(parent) { pool.setMaxThreadCount(2); }
+    int outstanding = 0;
+    QThreadPool pool;
+
+signals:
+    void capacityReleased();
+};
+
 namespace {
 OpenedSource fail(QString stage, QString code, QString detail) {
     return {{}, {}, {std::move(stage), std::move(code), std::move(detail)}};
 }
 
 using Mapping = std::shared_ptr<const uchar>;
-class SourceWorker : public QObject {
-public:
-    explicit SourceWorker(QObject *parent) : QObject(parent) { pool.setMaxThreadCount(2); }
-    QThreadPool pool;
-};
-
 struct SourceTask {
     SourceInput input;
     SourceReady ready;
-    std::shared_ptr<std::atomic_bool> live;
-    std::atomic<int> &outstanding;
-    ~SourceTask() { --outstanding; }
+    std::atomic_bool live{true};
 };
+
+SourceWorker &sourceWorker() {
+    static QPointer<SourceWorker> service;
+    if (!service)
+        service = new SourceWorker(QCoreApplication::instance());
+    return *service;
+}
 QImage imageView(const Mapping &mapping, QSize size, qint64 offset) {
     return QImage(
         mapping.get() + offset, size.width(), size.height(), size.width() * 4,
@@ -213,34 +223,36 @@ OpenedSource openSource(const QByteArray &bytes) {
             {}};
 }
 
-std::shared_ptr<void> prepareSource(SourceInput input, SourceReady ready) {
-    static QPointer<SourceWorker> service;
-    static std::atomic<int> outstanding;
+std::shared_ptr<void> prepareSource(const SourceInput &input, SourceReady ready) {
+    auto &service = sourceWorker();
     constexpr int SourceCapacity = 4;
-    if (outstanding.load() >= SourceCapacity)
+    if (service.outstanding >= SourceCapacity)
         return {};
-    if (!service)
-        service = new SourceWorker(QCoreApplication::instance());
-    auto live = std::make_shared<std::atomic_bool>(true);
-    auto task = std::shared_ptr<SourceTask>(
-        new SourceTask{std::move(input), std::move(ready), live, outstanding});
-    ++outstanding;
-    service->pool.start([owner = service.data(), weak = std::weak_ptr(task)] {
+    auto task = std::shared_ptr<SourceTask>(new SourceTask{input, std::move(ready)});
+    ++service.outstanding;
+    service.pool.start([owner = &service, weak = std::weak_ptr(task)] {
         const auto task = weak.lock();
-        if (!task || !task->live->load())
-            return;
-        auto result = std::visit([](const auto &input) { return openSource(input); }, task->input);
-        task->input = QUrl{};
-        if (task->live->load())
-            QMetaObject::invokeMethod(
-                owner,
-                [task, result = std::move(result)]() mutable {
-                    if (task->live->load())
-                        task->ready(std::move(result));
-                },
-                Qt::QueuedConnection);
+        OpenedSource result;
+        if (task && task->live) {
+            result = std::visit([](const auto &input) { return openSource(input); }, task->input);
+            task->input = QUrl{};
+        }
+        QMetaObject::invokeMethod(
+            owner,
+            [owner, task, result = std::move(result)]() mutable {
+                --owner->outstanding;
+                if (task && task->live)
+                    task->ready(std::move(result));
+                emit owner->capacityReleased();
+            },
+            Qt::QueuedConnection);
     });
-    return {task.get(), [task = std::move(task)](void *) { *task->live = false; }};
+    return {task.get(), [task = std::move(task)](void *) { task->live = false; }};
+}
+
+void onSourceCapacity(QObject *receiver, std::function<void()> released) {
+    QObject::connect(&sourceWorker(), &SourceWorker::capacityReleased, receiver,
+                     std::move(released));
 }
 
 Pool &decoderPool() {
@@ -339,3 +351,5 @@ QVariantMap asMap(const Failure &failure) {
     return {{"stage", failure.stage}, {"code", failure.code}, {"detail", failure.detail}};
 }
 } // namespace Imv
+
+#include "decode-client.moc"

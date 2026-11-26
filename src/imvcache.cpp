@@ -113,18 +113,19 @@ int ImvCache::exportThumbnail(const QUrl &source, int size) {
                                                                "Missing source revision"}));
                         return;
                     }
-                    imageStore().thumbnail(path, *asset->file, asset->pixels, asset->info, size,
-                                           [self, id](Failure failure, QUrl output) {
-                                               if (!self)
-                                                   return;
-                                               auto result =
-                                                   failure ? asMap(failure)
-                                                           : asMap(Failure{"complete", {}, {}});
-                                               if (!failure)
-                                                   result.insert("destination", output);
-                                               self->finish(id, result);
-                                           });
-                }));
+                    imageStore().thumbnail(
+                        path, *asset->file, asset->pixels, asset->info, size,
+                        self->d->exports.value(id), [self, id](Failure failure, QUrl output) {
+                            if (!self)
+                                return;
+                            auto result =
+                                failure ? asMap(failure) : asMap(Failure{"complete", {}, {}});
+                            if (!failure)
+                                result.insert("destination", output);
+                            self->finish(id, result);
+                        });
+                },
+                false));
     return id;
 }
 

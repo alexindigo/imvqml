@@ -19,6 +19,21 @@ bool nearSize(QSize old, QSize next) {
     const auto near = [](int a, int b) { return qAbs(a - b) < qMax(4, a / 8); };
     return !old.isEmpty() && near(old.width(), next.width()) && near(old.height(), next.height());
 }
+
+bool displayVisible(const QQuickItem &item) {
+    return item.isVisible() && item.window() && item.window()->isVisible() &&
+           item.window()->visibility() != QWindow::Minimized;
+}
+
+QSize displayBounds(const QQuickItem &item, qreal dpr) {
+    if (!item.window() || !std::isfinite(item.width()) || !std::isfinite(item.height()) ||
+        item.width() <= 0 || item.height() <= 0)
+        return {};
+    const auto edge = [dpr](qreal dimension) {
+        return int(qMin(qreal(MaxEdge + 1), std::ceil(dimension * dpr)));
+    };
+    return {edge(item.width()), edge(item.height())};
+}
 } // namespace
 
 struct ImvImage::State {
@@ -50,6 +65,11 @@ struct ImvImage::State {
     std::unique_ptr<Playback> playback;
     QMetaObject::Connection windowVisibility;
     ImagePipeline::Interest interest;
+
+    bool matches(QSize bounds, qreal pixelRatio) const {
+        return bounds == requested || (pixelRatio == dpr && rgbaBytes(bounds) &&
+                                       rgbaBytes(requested) && nearSize(requested, bounds));
+    }
 
     void revoke() {
         ++generation;
@@ -201,10 +221,11 @@ void ImvImage::setPlaying(bool playing) {
 }
 
 void ImvImage::syncPlayback() {
+    const bool visible = displayVisible(*this);
+    if (d->interest)
+        imagePipeline().setVisible(d->interest, visible);
     if (d->playback)
-        d->playback->run(d->status == Ready && d->animate && d->playing && isVisible() &&
-                         window() && window()->isVisible() &&
-                         window()->visibility() != QWindow::Minimized);
+        d->playback->run(d->status == Ready && d->animate && d->playing && visible);
 }
 
 double ImvImage::videoPosition() const { return d->videoPosition; }
@@ -271,6 +292,11 @@ void ImvImage::itemChange(ItemChange change, const ItemChangeData &value) {
 void ImvImage::geometryChange(const QRectF &now, const QRectF &before) {
     QQuickItem::geometryChange(now, before);
     if (now.size() != before.size()) {
+        const auto dpr = window() ? window()->effectiveDevicePixelRatio() : 1;
+        if (d->interest && d->status == Loading && !d->matches(displayBounds(*this, dpr), dpr)) {
+            d->interest.reset();
+            d->requested = {};
+        }
         polish();
         refreshPresentation();
     }
@@ -281,21 +307,15 @@ void ImvImage::updatePolish() {
         return;
     if (d->provider && !*d->provider)
         return;
-    if (!window() || !std::isfinite(width()) || !std::isfinite(height()) || width() <= 0 ||
-        height() <= 0) {
+    const auto dpr = window() ? window()->effectiveDevicePixelRatio() : 1;
+    const auto bounds = displayBounds(*this, dpr);
+    if (bounds.isEmpty()) {
         if (!d->requested.isEmpty()) {
             resetRequest(false);
         }
         return;
     }
-    const auto dpr = window()->effectiveDevicePixelRatio();
-    const auto edge = [dpr](qreal dimension) {
-        // Keep an out-of-bounds sentinel rather than overflowing on a large item.
-        return int(qMin(qreal(MaxEdge + 1), std::ceil(dimension * dpr)));
-    };
-    const QSize bounds(edge(width()), edge(height()));
-    if (bounds == d->requested || (dpr == d->dpr && rgbaBytes(bounds) && rgbaBytes(d->requested) &&
-                                   nearSize(d->requested, bounds)))
+    if (d->matches(bounds, dpr))
         return;
     d->revoke();
     d->dpr = dpr;
@@ -352,7 +372,7 @@ void ImvImage::updatePolish() {
                 {});
     } else {
         auto source = d->hasBytes ? SourceInput(d->bytes) : SourceInput(d->url);
-        d->interest = imagePipeline().request(std::move(source), spec, done);
+        d->interest = imagePipeline().request(std::move(source), spec, done, displayVisible(*this));
     }
 }
 

@@ -64,6 +64,7 @@ public:
                   Validator validator = {});
     bool cancel(int id);
     Admission capacity() const;
+    int idleSlots() const;
     bool available() const { return capacity() == Admission::Accepted; }
 
 signals:

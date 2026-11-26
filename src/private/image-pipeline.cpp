@@ -3,174 +3,272 @@
 
 #include <QCoreApplication>
 #include <QCryptographicHash>
-#include <fcntl.h>
+#include <algorithm>
 
 namespace Imv {
+namespace {
+Failure expired() { return {"admission", "deadline", "Display admission deadline expired"}; }
+} // namespace
 
-ImagePipeline::ImagePipeline(Pool &pool, QObject *parent) : QObject(parent), m_pool(pool) {
+ImagePipeline::ImagePipeline(Pool &pool, QObject *parent, int waitMs)
+    : QObject(parent), m_pool(pool), m_waitMs(waitMs) {
     connect(&pool, &Pool::capacityReleased, this, &ImagePipeline::pumpLater);
+    onSourceCapacity(this, [this] { pumpLater(); });
+    m_deadline.setSingleShot(true);
+    m_deadline.setTimerType(Qt::PreciseTimer);
+    connect(&m_deadline, &QTimer::timeout, this, &ImagePipeline::pumpLater);
 }
 
-ImagePipeline::Interest ImagePipeline::interest(Done done,
-                                                const std::shared_ptr<Pending> &pending) {
-    return Interest(new Done(std::move(done)),
-                    [self = QPointer(this), weak = std::weak_ptr(pending)](const Done *callback) {
-                        delete callback;
-                        auto request = weak.lock();
-                        if (!self || !request || self->m_pending.value(request->key) != request)
-                            return;
-                        request->listeners.removeIf(
-                            [](const auto &listener) { return listener.expired(); });
-                        if (!request->listeners.isEmpty())
-                            return;
-                        self->m_pending.remove(request->key);
-                        if (request->ticket)
-                            self->m_pool.cancel(request->ticket);
-                    });
-}
-
-ImagePipeline::Interest ImagePipeline::request(OpenedSource source, DecodeSpec spec, Done done) {
-    auto &store = imageStore();
-    const auto key = source.identity + '\0' + encode(spec) + QByteArray::number(store.epoch());
-    if (!source.error && !spec.valid())
-        source.error = {"admission", "invalid-size", "Physical size exceeds the output edge limit"};
-    prune();
-    auto asset = m_assets.value(key).lock();
-    if (!source.error && !asset && !m_pending.contains(key) && m_pending.size() >= 8)
-        source.error = {"admission", "busy", "Display decode queue is full"};
-    if (source.error || asset) {
-        auto lease = interest(std::move(done));
-        QMetaObject::invokeMethod(
-            this,
-            [weak = std::weak_ptr(lease), asset = std::move(asset),
-             error = std::move(source.error)] {
-                if (const auto callback = weak.lock())
-                    (*callback)(asset, error);
-            },
-            Qt::QueuedConnection);
-        return lease;
+ImagePipeline::Interest ImagePipeline::request(std::variant<SourceInput, OpenedSource> source,
+                                               DecodeSpec spec, Done done, bool visible) {
+    Interest lease(new Listener, [self = QPointer(this)](Listener *listener) {
+        auto request = listener->pending.lock();
+        delete listener;
+        if (!self || !request)
+            return;
+        request->listeners.removeIf([](const auto &weak) { return weak.expired(); });
+        if (request->listeners.isEmpty())
+            self->remove(request);
+    });
+    lease->done = std::move(done);
+    lease->visible = visible;
+    if (!spec.valid()) {
+        deliver(lease, {},
+                {"admission", "invalid-size", "Physical size exceeds the output edge limit"});
+    } else if (m_queue.size() >= QueueLimit) {
+        deliver(lease, {}, {"admission", "deadline", "Display admission queue is full"});
+    } else {
+        auto request = std::make_shared<Pending>();
+        request->source = std::move(source);
+        request->spec = spec;
+        request->deadline = QDeadlineTimer(m_waitMs, Qt::PreciseTimer);
+        request->order = ++m_order;
+        request->listeners.append(lease);
+        lease->pending = request;
+        m_queue.append(std::move(request));
+        pumpLater();
     }
-    auto &entry = m_pending[key];
-    if (!entry) {
-        entry = std::make_shared<Pending>(Pending{
-            key, std::make_shared<Fd>(std::move(source.fd)), spec, 0, {}, false, {}, source.file});
-        if (store.enabled()) {
-            store.lookup(
-                std::weak_ptr<const Fd>(entry->input), spec,
-                [self = QPointer(this), pending = std::weak_ptr(entry)](ImageStore::Lookup result) {
-                    auto request = pending.lock();
-                    if (!self || !request || self->m_pending.value(request->key) != request)
-                        return;
-                    auto value = std::exchange(result.value, {});
-                    request->cached = std::move(result);
-                    if (value) {
-                        self->finish(request, std::move(*value), true);
-                    } else {
-                        self->m_waiting.append(request);
-                        self->pumpLater();
-                    }
-                });
-        } else {
-            m_waiting.append(entry);
-            pumpLater();
-        }
-    }
-    auto lease = interest(std::move(done), entry);
-    entry->listeners.append(lease);
     return lease;
 }
 
-ImagePipeline::Interest ImagePipeline::request(SourceInput source, DecodeSpec spec, Done done) {
-    struct Request {
-        std::shared_ptr<void> preparing;
-        Interest child;
-    };
-    const auto state = std::make_shared<Request>();
-    auto handle =
-        Interest(new Done(std::move(done)), [state](const Done *callback) { delete callback; });
-    const auto weak = std::weak_ptr(handle);
-    state->preparing = prepareSource(std::move(source), [weak, request = std::weak_ptr(state),
-                                                         self = QPointer(this),
-                                                         spec](OpenedSource input) {
-        const auto active = request.lock();
-        if (!self || !active)
-            return;
-        active->preparing.reset();
-        active->child = self->request(std::move(input), spec, [weak](Asset asset, Failure error) {
-            if (auto callback = weak.lock())
-                (*callback)(std::move(asset), std::move(error));
-        });
-    });
-    if (!state->preparing)
-        QMetaObject::invokeMethod(
-            this,
-            [weak] {
-                if (auto callback = weak.lock())
-                    (*callback)({}, {"admission", "busy", "Source preparation queue is full"});
-            },
-            Qt::QueuedConnection);
-    return handle;
+void ImagePipeline::setVisible(const Interest &interest, bool visible) {
+    if (interest && std::exchange(interest->visible, visible) != visible)
+        pumpLater();
+}
+
+void ImagePipeline::opened(const std::shared_ptr<Pending> &request, OpenedSource source) {
+    request->preparing.reset();
+    request->source = SourceInput{};
+    if (request->deadline.hasExpired()) {
+        finish(request, {{}, {}, expired()});
+        return;
+    }
+    if (source.error) {
+        finish(request, {{}, {}, std::move(source.error)});
+        return;
+    }
+    auto &store = imageStore();
+    request->key =
+        source.identity + '\0' + encode(request->spec) + QByteArray::number(store.epoch());
+    prune();
+    if (auto asset = m_assets.value(request->key).lock()) {
+        finish(request, {}, true, std::move(asset));
+        return;
+    }
+    auto other = m_pending.value(request->key);
+    if (other && other->phase != Decoding && other->deadline.hasExpired()) {
+        finish(other, {{}, {}, expired()});
+        other.reset();
+    }
+    if (other) {
+        other->order = qMin(other->order, request->order);
+        for (const auto &weak : std::as_const(request->listeners)) {
+            if (auto listener = weak.lock()) {
+                listener->pending = other;
+                other->listeners.append(weak);
+            }
+        }
+        remove(request);
+        return;
+    }
+    m_pending.insert(request->key, request);
+    request->input = std::make_shared<Fd>(std::move(source.fd));
+    request->file = source.file;
+    request->phase = Ready;
+    if (!store.enabled())
+        return;
+    request->phase = LookingUp;
+    store.lookup(std::weak_ptr<const Fd>(request->input), request->spec,
+                 [self = QPointer(this), weak = std::weak_ptr(request)](ImageStore::Lookup result) {
+                     const auto active = weak.lock();
+                     if (!self || !active || !self->m_queue.contains(active))
+                         return;
+                     if (active->deadline.hasExpired()) {
+                         self->finish(active, {{}, {}, expired()});
+                         return;
+                     }
+                     auto value = std::exchange(result.value, {});
+                     active->cached = std::move(result);
+                     if (value) {
+                         self->finish(active, std::move(*value), true);
+                     } else {
+                         active->phase = Ready;
+                         self->pumpLater();
+                     }
+                 });
 }
 
 void ImagePipeline::pumpLater() {
-    if (std::exchange(m_scheduled, true))
-        return;
-    QMetaObject::invokeMethod(this, &ImagePipeline::pump, Qt::QueuedConnection);
+    if (!std::exchange(m_scheduled, true))
+        QMetaObject::invokeMethod(this, &ImagePipeline::pump, Qt::QueuedConnection);
 }
 
 void ImagePipeline::pump() {
-    m_scheduled = false;
-    while (!m_waiting.isEmpty() && m_pool.capacity() != Pool::Admission::Busy) {
-        const auto request = m_waiting.takeFirst().lock();
-        if (!request || m_pending.value(request->key) != request)
-            continue;
-        const bool classify = request->spec.mode == DecodeSpec::Animation && !request->classified;
-        const auto ticket = submitDecode(
-            m_pool, duplicateSource(*request->input), classify ? DecodeSpec{} : request->spec,
-            [self = QPointer(this), request, classify](Decoded decoded) {
-                if (!self || self->m_pending.value(request->key) != request)
-                    return;
-                request->ticket = 0;
-                if (classify && !decoded.error) {
-                    request->classified = true;
-                    if (!decoded.delay)
-                        request->spec.mode = DecodeSpec::Pixels;
-                    self->m_waiting.append(request);
-                    self->pumpLater();
-                } else {
-                    self->finish(request, std::move(decoded));
-                }
+    // Start preparation only against an idle helper slot. This leaves queued
+    // sources eligible for visibility reordering until a slot is available,
+    // keeps sealed snapshots bounded, and avoids pre-staging hidden work.
+    constexpr int StagedLimit = 4;
+    for (const auto &request : QList(m_queue)) {
+        if (request->phase != Decoding && request->deadline.hasExpired())
+            finish(request, {{}, {}, expired()});
+    }
+    bool sourceBusy = false;
+    for (;;) {
+        const auto reservations = std::ranges::count_if(m_queue, [](const auto &request) {
+            return request->phase != Waiting && request->phase != Decoding;
+        });
+        const auto capacity = m_pool.capacity();
+        const bool canStage = reservations < qMin(m_pool.idleSlots(), StagedLimit) ||
+                              (capacity == Pool::Admission::Exhausted && !reservations);
+        const bool canDecode = capacity != Pool::Admission::Busy;
+        std::shared_ptr<Pending> next;
+        bool nextVisible = false;
+        for (const auto &candidate : std::as_const(m_queue)) {
+            const bool alreadyOpen = std::holds_alternative<OpenedSource>(candidate->source);
+            if (!(candidate->phase == Ready && canDecode) &&
+                !(candidate->phase == Waiting &&
+                  (alreadyOpen ? reservations < StagedLimit : canStage && !sourceBusy)))
+                continue;
+            const bool visible = std::ranges::any_of(candidate->listeners, [](const auto &weak) {
+                const auto listener = weak.lock();
+                return listener && listener->visible;
             });
-        if (ticket.status == Pool::Admission::Accepted) {
-            request->ticket = ticket.id;
-            if (!classify)
-                ++m_submissions;
+            if (!next || visible > nextVisible ||
+                (visible == nextVisible && candidate->order < next->order)) {
+                next = candidate;
+                nextVisible = visible;
+            }
+        }
+        if (!next)
+            break;
+        if (next->deadline.hasExpired()) {
+            finish(next, {{}, {}, expired()});
+        } else if (next->phase == Ready) {
+            submit(next);
+        } else if (auto *input = std::get_if<OpenedSource>(&next->source)) {
+            // Consume the variant before opened() clears it or changes phase.
+            auto source = std::move(*input);
+            opened(next, std::move(source));
         } else {
-            finish(request,
-                   {{}, {}, {"admission", "output-failed", "Could not admit a display decode"}});
+            next->preparing = prepareSource(
+                std::get<SourceInput>(next->source),
+                [self = QPointer(this), weak = std::weak_ptr(next)](OpenedSource source) {
+                    if (const auto active = weak.lock();
+                        self && active && self->m_queue.contains(active)) {
+                        self->opened(active, std::move(source));
+                        self->pumpLater();
+                    }
+                });
+            if (next->preparing) {
+                next->phase = Preparing;
+                next->source = SourceInput{};
+            } else {
+                sourceBusy = true;
+            }
         }
     }
-    // Waiting entries whose owners disappeared must not accumulate while the pool is occupied.
-    m_waiting.removeIf([](const auto &weak) { return weak.expired(); });
+    qint64 remaining = m_waitMs;
+    bool hasDeadline = false;
+    for (const auto &request : std::as_const(m_queue)) {
+        if (request->phase != Decoding) {
+            hasDeadline = true;
+            remaining = qMin(remaining, request->deadline.remainingTime());
+        }
+    }
+    if (hasDeadline)
+        m_deadline.start(int(qMax<qint64>(1, remaining)));
+    else
+        m_deadline.stop();
+    m_scheduled = false;
 }
 
-void ImagePipeline::finish(const std::shared_ptr<Pending> &request, Decoded decoded, bool hit) {
-    if (m_pending.value(request->key) != request)
+void ImagePipeline::submit(const std::shared_ptr<Pending> &request) {
+    const bool classify = request->spec.mode == DecodeSpec::Animation && !request->classified;
+    const auto ticket = submitDecode(
+        m_pool, duplicateSource(*request->input), classify ? DecodeSpec{} : request->spec,
+        [self = QPointer(this), weak = std::weak_ptr(request), classify](Decoded decoded) {
+            const auto active = weak.lock();
+            if (!self || !active || !self->m_queue.contains(active))
+                return;
+            active->ticket = 0;
+            if (classify && !decoded.error) {
+                active->classified = true;
+                if (!decoded.delay)
+                    active->spec.mode = DecodeSpec::Pixels;
+                active->phase = Ready;
+                active->deadline = QDeadlineTimer(self->m_waitMs, Qt::PreciseTimer);
+                self->pumpLater();
+            } else {
+                self->finish(active, std::move(decoded));
+            }
+        });
+    if (ticket.status == Pool::Admission::Busy)
         return;
-    m_pending.remove(request->key);
+    if (ticket.status != Pool::Admission::Accepted) {
+        finish(request,
+               {{}, {}, {"admission", "output-failed", "Could not admit a display decode"}});
+        return;
+    }
+    request->phase = Decoding;
+    request->ticket = ticket.id;
+    if (!classify)
+        ++m_submissions;
+}
+
+void ImagePipeline::remove(const std::shared_ptr<Pending> &request) {
+    if (!m_queue.removeOne(request))
+        return;
+    if (m_pending.value(request->key) == request)
+        m_pending.remove(request->key);
+    request->preparing.reset();
+    if (request->ticket)
+        m_pool.cancel(request->ticket);
+    pumpLater();
+}
+
+void ImagePipeline::deliver(std::weak_ptr<Listener> listener, Asset asset, Failure error) {
+    QMetaObject::invokeMethod(
+        this,
+        [listener = std::move(listener), asset = std::move(asset), error = std::move(error)] {
+            if (const auto callback = listener.lock())
+                callback->done(asset, error);
+        },
+        Qt::QueuedConnection);
+}
+
+void ImagePipeline::finish(const std::shared_ptr<Pending> &request, Decoded decoded, bool hit,
+                           Asset asset) {
+    remove(request);
     if (!hit && request->cached.lease)
         imageStore().publish(request->cached, decoded);
-    Asset asset;
-    if (!decoded.error) {
+    if (!asset && !decoded.error) {
         auto stream = decoded.stream ? request->input : nullptr;
         asset = exchangeAsset({request->key, std::move(decoded.source), std::move(decoded.pixels),
                                std::move(decoded.animation), std::move(stream), request->spec,
                                decoded.delay, false, request->cached.lease, request->file});
     }
-    for (const auto &weak : std::as_const(request->listeners)) {
-        if (const auto callback = weak.lock())
-            (*callback)(asset, decoded.error);
-    }
+    for (const auto &weak : std::as_const(request->listeners))
+        deliver(weak, asset, decoded.error);
 }
 
 void ImagePipeline::prune() {

@@ -40,7 +40,8 @@ using SourceInput = std::variant<QUrl, QByteArray>;
 using SourceReady = std::function<void(OpenedSource)>;
 // Empty means admission was busy; destroying a live handle revokes delivery
 // and releases a source that has not entered the worker yet.
-std::shared_ptr<void> prepareSource(SourceInput input, SourceReady ready);
+std::shared_ptr<void> prepareSource(const SourceInput &input, SourceReady ready);
+void onSourceCapacity(QObject *receiver, std::function<void()> released);
 Pool &decoderPool();
 Fd duplicateSource(const Fd &fd);
 Pool::Ticket submitDecode(Pool &pool, Fd input, DecodeSpec spec, std::function<void(Decoded)> done);

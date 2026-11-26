@@ -26,6 +26,17 @@ ProviderSnapshot snapshot(QImage image, QSize original) {
         return {{}, {}, {"decode", "output-failed", "Could not own provider pixels"}};
     return {original, std::move(owned), {}};
 }
+
+ProviderSnapshot snapshotTexture(std::unique_ptr<QQuickTextureFactory> factory, QSize original,
+                                 QString noFactoryDetail) {
+    if (!factory)
+        return {{}, {}, {"open", "unreadable", std::move(noFactoryDetail)}};
+    // A factory can lend rather than transfer its image storage. Retire the
+    // factory only after snapshot has copied the image into owned memory.
+    if (original.isEmpty())
+        original = factory->textureSize();
+    return snapshot(factory->image(), original);
+}
 } // namespace
 
 Decoded rasterizeProvider(const ProviderSnapshot &snapshot, DecodeSpec spec) {
@@ -85,11 +96,12 @@ std::function<void()> snapshotProvider(QQmlEngine *engine, const QUrl &url, QObj
         image = provider->requestPixmap(id, &original, nativeSize).toImage();
         break;
     case QQmlImageProviderBase::Texture: {
-        const auto factory = std::unique_ptr<QQuickTextureFactory>(
+        auto factory = std::unique_ptr<QQuickTextureFactory>(
             provider->requestTexture(id, &original, nativeSize));
-        if (factory)
-            image = factory->image();
-        break;
+        // requestTexture writes original; evaluate it only after that call.
+        done(snapshotTexture(std::move(factory), original,
+                             QStringLiteral("Image provider did not return CPU pixels")));
+        return {};
     }
     case QQmlImageProviderBase::ImageResponse: {
         auto *async = dynamic_cast<QQuickAsyncImageProvider *>(provider);
@@ -108,13 +120,9 @@ std::function<void()> snapshotProvider(QQmlEngine *engine, const QUrl &url, QObj
                 const auto callback = std::exchange(*state, {});
                 if (!receiver || !callback)
                     return;
-                const auto factory =
-                    std::unique_ptr<QQuickTextureFactory>(response->textureFactory());
-                if (!factory) {
-                    callback({{}, {}, {"open", "unreadable", response->errorString()}});
-                    return;
-                }
-                callback(snapshot(factory->image(), factory->textureSize()));
+                auto factory = std::unique_ptr<QQuickTextureFactory>(response->textureFactory());
+                auto error = factory ? QString() : response->errorString();
+                callback(snapshotTexture(std::move(factory), {}, std::move(error)));
             },
             Qt::SingleShotConnection);
         return [response = QPointer(response), interest = std::move(interest)]() mutable {

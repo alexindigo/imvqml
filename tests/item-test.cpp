@@ -40,6 +40,23 @@ public:
     }
 };
 
+class BorrowingFactory : public QQuickTextureFactory {
+public:
+    explicit BorrowingFactory(uchar *storage) : m_storage(storage) {}
+    // Return the slot to the provider when the factory's lease ends. Keep the
+    // storage allocated so reading it after retirement fails deterministically.
+    ~BorrowingFactory() override { std::fill_n(m_storage, textureByteCount(), uchar(0)); }
+    QSGTexture *createTexture(QQuickWindow *) const override { return nullptr; }
+    QSize textureSize() const override { return {64, 64}; }
+    int textureByteCount() const override { return 64 * 64 * 4; }
+    QImage image() const override {
+        return QImage(m_storage, 64, 64, 64 * 4, QImage::Format_RGBA8888);
+    }
+
+private:
+    uchar *const m_storage;
+};
+
 class TransientProvider : public QQuickImageProvider {
 public:
     explicit TransientProvider(ImageType type) : QQuickImageProvider(type) { storage.fill(255); }
@@ -56,6 +73,15 @@ public:
     }
     QPixmap requestPixmap(const QString &id, QSize *original, const QSize &requested) override {
         return QPixmap::fromImage(requestImage(id, original, requested));
+    }
+    QQuickTextureFactory *requestTexture(const QString &, QSize *original, const QSize &) override {
+        ++requests;
+        onGuiThread = QThread::currentThread() == QCoreApplication::instance()->thread();
+        *original = {64, 64};
+        if (!available)
+            return nullptr;
+        storage.fill(255);
+        return new BorrowingFactory(storage.data());
     }
     int requests = 0;
     bool onGuiThread = false;
@@ -101,6 +127,7 @@ void ItemTest::transientProvider_data() {
     QTest::addColumn<int>("type");
     QTest::newRow("Image") << int(QQuickImageProvider::Image);
     QTest::newRow("Pixmap") << int(QQuickImageProvider::Pixmap);
+    QTest::newRow("Texture") << int(QQuickImageProvider::Texture);
 }
 
 void ItemTest::transientProvider() {
@@ -147,7 +174,7 @@ Window {
 void ItemTest::transientProviderJob() {
     QQmlEngine engine;
     engine.addImportPath(IMV_IMPORT_PATH);
-    auto *provider = new TransientProvider(QQuickImageProvider::Image);
+    auto *provider = new TransientProvider(QQuickImageProvider::Texture);
     engine.addImageProvider("transient", provider);
     QQmlComponent component(&engine);
     component.setData("import ImvQml\nImvImageJob {}", QUrl());

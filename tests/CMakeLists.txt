@@ -17,18 +17,19 @@ add_dependencies(imv-pool-test imv-fault-child)
 add_test(NAME pool COMMAND imv-pool-test)
 set_tests_properties(pool PROPERTIES TIMEOUT 18)
 
-find_program(IMV_MAGICK magick REQUIRED)
+find_program(IMV_VIPS_CLI vips REQUIRED)
+find_program(IMV_FFMPEG ffmpeg REQUIRED)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 set(fixtures "${CMAKE_CURRENT_BINARY_DIR}/fixtures")
 add_test(NAME generate-fixtures
-    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/generate-fixtures.py" "${fixtures}" "${IMV_MAGICK}")
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/generate-fixtures.py"
+        "${fixtures}" "${IMV_VIPS_CLI}" "${IMV_FFMPEG}")
 set_tests_properties(generate-fixtures PROPERTIES FIXTURES_SETUP images TIMEOUT 30)
 option(IMV_REQUIRE_VIDEO_TESTS "Require the native video tests instead of skipping an absent runtime" OFF)
 if(IMV_REQUIRE_VIDEO_TESTS AND (NOT IMV_ENABLE_VIDEO OR NOT EXISTS "${imv_mpv_runtime}"))
     message(FATAL_ERROR "Required video tests need the adapter and libmpv.so.2 (or IMV_MPV_RUNTIME_HINT)")
 endif()
 if(imv_mpv_runtime OR NOT IMV_ENABLE_VIDEO)
-find_program(IMV_FFMPEG ffmpeg REQUIRED)
 add_test(NAME generate-video COMMAND "${Python3_EXECUTABLE}"
     "${CMAKE_CURRENT_SOURCE_DIR}/generate-video.py" "${fixtures}" "${IMV_FFMPEG}")
 set_tests_properties(generate-video PROPERTIES FIXTURES_REQUIRED images FIXTURES_SETUP videos TIMEOUT 30)

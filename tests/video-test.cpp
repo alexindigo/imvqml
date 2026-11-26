@@ -40,6 +40,8 @@ private slots:
         QTest::addColumn<QString>("quadrants");
         QTest::newRow("first") << QString("seek.webm") << 0.0 << QSize(128, 72) << QString("rrrr");
         QTest::newRow("seek") << QString("seek.webm") << 0.75 << QSize(128, 72) << QString("bbbb");
+        QTest::newRow("large sparse file without extension")
+            << QString("large-video") << 0.5 << QSize(128, 72) << QString("rgby");
         QTest::newRow("90") << QString("rotation-90.mp4") << 0.0 << QSize(72, 128)
                             << QString("gyrb");
         QTest::newRow("180") << QString("rotation-180.mp4") << 0.0 << QSize(128, 72)

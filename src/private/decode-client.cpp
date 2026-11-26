@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 #include "decode-client.h"
+#include "video-signature.h"
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QFile>
@@ -82,6 +83,7 @@ OpenedSource openData(const QUrl &url) {
     QCryptographicHash hash(QCryptographicHash::Sha256);
     qint64 size = 0;
     bool padded = false;
+    bool video = false;
     for (qsizetype i = comma + 1; i <= text.size();) {
         if (i < text.size()) {
             auto c = text[i++].unicode();
@@ -110,7 +112,9 @@ OpenedSource openData(const QUrl &url) {
                 return fail("admission", "invalid-source", "Malformed base64 data URL");
             block = std::move(decoded.decoded);
         }
-        if (block.size() > MaxSourceBytes - size)
+        if (!size)
+            video = videoDemuxer(QByteArrayView(block).left(VideoSignatureBytes));
+        if (!video && block.size() > MaxSourceBytes - size)
             return fail("admission", "too-large", "Source exceeds 256 MiB");
         if (!writeAll(fd.get(), block.constData(), block.size(), size))
             return fail("open", "unreadable", "Could not write the byte descriptor");
@@ -183,8 +187,6 @@ CapturedSource captureSource(const QUrl &url) {
     struct stat info{};
     if (!fd || ::fstat(fd.get(), &info) != 0 || !S_ISREG(info.st_mode))
         return {{}, {}, {}, {"open", "unreadable", "Cannot open a readable regular file"}};
-    if (info.st_size > MaxSourceBytes)
-        return {{}, {}, {}, {"admission", "too-large", "Source exceeds 256 MiB"}};
     return {{}, std::move(fd), info};
 }
 
@@ -210,6 +212,11 @@ OpenedSource materialize(CapturedSource source) {
                     number(info.st_size) + '/' + number(info.st_mtim.tv_sec) + '/' +
                     number(info.st_mtim.tv_nsec) + '/' + number(info.st_ctim.tv_sec) + '/' +
                     number(info.st_ctim.tv_nsec);
+    // A disk video can be arbitrarily large. Only the helper identifies and
+    // streams over-limit files; it never sends an unsealed input to an image
+    // reader. The persistent store already skips hashing over-limit inputs.
+    if (info.st_size > MaxSourceBytes)
+        return {std::move(source.fd), std::move(identity), {}, info};
     auto snapshot = newMemfd("imvqml-file-source");
     if (!snapshot)
         return fail("open", "unreadable", "Could not create a source snapshot");
@@ -236,7 +243,8 @@ OpenedSource materialize(CapturedSource source) {
 OpenedSource openSource(const QUrl &url) { return materialize(captureSource(url)); }
 
 OpenedSource openSource(const QByteArray &bytes) {
-    if (bytes.size() > MaxSourceBytes)
+    if (bytes.size() > MaxSourceBytes &&
+        !videoDemuxer(QByteArrayView(bytes).left(VideoSignatureBytes)))
         return fail("admission", "too-large", "Source exceeds 256 MiB");
     auto fd = newMemfd("imvqml-source");
     if (!fd || !writeAll(fd.get(), bytes.constData(), bytes.size()) ||

@@ -6,10 +6,20 @@ controls, and animated GIF and WebP playback. `ImvImageJob` inspects images,
 samples pixels, and exports PNG or WebP without a window. `ImvCache` manages
 an optional disk cache and exports freedesktop thumbnails.
 
-The decoder supports JPEG, PNG, GIF, WebP, TIFF, SVG, HEIF, AVIF, and JPEG XL
-when the corresponding libvips loaders are available. Use local paths,
-`file:` or `data:` URLs, or Qt image providers for display. The module does not
-fetch network URLs.
+Use local paths, `file:` or `data:` URLs, or Qt image providers for display.
+The module does not fetch network URLs. Encoded images are recognized by
+their contents, not their extension.
+
+| Extensions | Reader in the helper |
+| --- | --- |
+| `jpg`, `jpeg`, `png`, `gif`, `webp`, `tiff`, `tif` | libvips native loaders |
+| `avif`, `heic`, `heif`, `jxl` | libvips with libheif or libjxl |
+| `svg`, `svgz` | libvips with librsvg |
+| `pnm`, `pgm`, `ppm`, `pbm` | libvips PNM loader |
+| `jp2`, `j2k`, `exr`, `hdr` | libvips JPEG 2000, OpenEXR and Radiance loaders |
+| `bmp`, `ico` | Qt Gui and its ICO reader |
+| `icns`, `tga` | Qt Gui with `qt6-imageformats` |
+| `dds` | Qt Gui with the DDS reader from `kimageformats` |
 
 ## Usage
 
@@ -53,15 +63,20 @@ video or audio. Image decoding works without libmpv installed.
 
 Encoded media goes to a separate helper that returns pixels to the app. If a
 codec crashes or hangs, imvqml can report the request failure and retire the
-helper instead of losing the QML process. The helper restricts which libvips
-loaders it uses, and request sizes and animation buffering are bounded. This
-is fault isolation, not an OS sandbox.
+helper instead of losing the QML process. Only explicitly allowed libvips and
+Qt readers run in the helper; ImageMagick is not used. Images have a 256 MiB
+encoded-source limit. The helper streams large local videos without copying
+the file; the capture deadline, pixel limit and helper memory limit still
+apply. This is fault isolation, not an OS sandbox.
 
 ## Requirements
 
 - Linux, a C++20 compiler, CMake 3.24+, and pkg-config.
 - Qt 6.8+ (Core, Gui, Qml, Quick), libvips 8.14+, and libwebp. AVIF/HEIF and
   JPEG XL need libvips built with the appropriate libheif and libjxl loaders.
+- The full format table requires the listed libvips features and Qt 6 image
+  readers. On Arch, install `qt6-imageformats` and `kimageformats` for ICNS,
+  TGA and DDS.
 - Video-capable builds (the default) require mpv 0.35+ development headers
   exposing client ABI 2 and software rendering. At runtime only the decoder
   loads `libmpv.so.2`; still images work without it. An unavailable or

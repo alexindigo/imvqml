@@ -27,17 +27,19 @@ public:
     bool enabled() const;
     void setEnabled(bool enabled);
 
-    Q_INVOKABLE void clear();
-    Q_INVOKABLE void invalidate(const QUrl &source);
+    Q_INVOKABLE int clear();
+    Q_INVOKABLE int invalidate(const QUrl &source);
     Q_INVOKABLE int exportThumbnail(const QUrl &source, int size = 128);
 
 signals:
     void policyChanged();
+    void cleared(int ticket, const QVariantMap &result);
     void thumbnailFinished(int id, const QVariantMap &result);
 
 private:
     struct State;
     std::unique_ptr<State> d;
+    int evict(const QUrl *source);
     void finish(int id, const QVariantMap &result);
 };
 } // namespace Imv

@@ -73,15 +73,30 @@ void ImvCache::setEnabled(bool enabled) {
     emit policy().changed();
 }
 
-void ImvCache::clear() {
+int ImvCache::clear() { return evict(nullptr); }
+
+int ImvCache::invalidate(const QUrl &url) { return evict(&url); }
+
+int ImvCache::evict(const QUrl *source) {
+    if (d->lastId == INT_MAX)
+        return -3;
+    const int ticket = ++d->lastId;
     // Also handle a store that has never been enabled in this process.
     policy().value.apply();
-    imageStore().clear();
-}
-
-void ImvCache::invalidate(const QUrl &url) {
-    policy().value.apply();
-    imageStore().invalidate(url);
+    const auto done = [self = QPointer(this), ticket](ImageStore::Eviction eviction) {
+        if (!self)
+            return;
+        auto result = asMap(eviction.error ? eviction.error : Failure{"complete", {}, {}});
+        result.insert("removed", eviction.removed);
+        result.insert("kept", eviction.kept);
+        result.insert("failed", eviction.failed);
+        emit self->cleared(ticket, result);
+    };
+    if (source)
+        imageStore().invalidate(*source, done);
+    else
+        imageStore().clear(done);
+    return ticket;
 }
 
 int ImvCache::exportThumbnail(const QUrl &source, int size) {

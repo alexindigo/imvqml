@@ -5,5 +5,5 @@
 
 namespace Imv {
 bool initializeVips(const char *program);
-DecodeReport decodeWithVips(int input, int output, const DecodeSpec &spec, qint64 length);
+DecodeReport decodeImage(int input, int output, const DecodeSpec &spec, qint64 length);
 } // namespace Imv

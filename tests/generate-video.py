@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LGPL-3.0-only
 import pathlib
+import struct
 import subprocess
 import sys
 
@@ -23,3 +24,11 @@ run('-f', 'lavfi', '-i', 'color=red:s=128x72:r=10:d=1', '-vf',
     '-threads', '1', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', 'rotation-base.mp4')
 for angle in (90, 180, 270):
     run('-display_rotation', str(angle), '-i', 'rotation-base.mp4', '-c', 'copy', f'rotation-{angle}.mp4')
+
+# Add a valid sparse ISO BMFF padding box. The movie, including its seek
+# index, stays valid; decoding must not copy the 256 MiB of padding.
+with (root / 'large-video').open('wb') as stream:
+    stream.write((root / 'rotation-base.mp4').read_bytes())
+    start = stream.tell()
+    stream.write(struct.pack('>I4s', 256 * 1024 * 1024, b'free'))
+    stream.truncate(start + 256 * 1024 * 1024)

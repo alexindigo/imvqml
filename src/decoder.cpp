@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 #include "video-decode.h"
 #include "vips-decode.h"
+#include <QCoreApplication>
 
 #include <fcntl.h>
 #include <signal.h>
@@ -12,13 +13,27 @@ namespace {
 Imv::DecodeReport decodeInput(int input, int output, const Imv::DecodeSpec &spec) {
     using namespace Imv;
     struct stat stat{};
+    if (::fstat(input, &stat) || !S_ISREG(stat.st_mode))
+        return {DecodeCode::Unreadable, {}, {0, 0}, "Input must be a regular descriptor"};
     const int seals = ::fcntl(input, F_GET_SEALS);
-    if (seals < 0 || (seals & MemfdSeals) != MemfdSeals || ::fstat(input, &stat) ||
-        !S_ISREG(stat.st_mode))
-        return {DecodeCode::Unreadable, {}, {0, 0}, "Input must be a sealed regular descriptor"};
-    if (stat.st_size > MaxSourceBytes)
+    const bool sealed = seals >= 0 && (seals & MemfdSeals) == MemfdSeals;
+    if (stat.st_size > MaxSourceBytes) {
+        const int flags = ::fcntl(input, F_GETFL);
+        if (!sealed && (flags < 0 || (flags & (O_ACCMODE | O_PATH)) != O_RDONLY))
+            return {DecodeCode::Unreadable, {}, {0, 0}, "Stream must be a read-only descriptor"};
+        if (auto video = decodeVideo(input, output, spec)) {
+            struct stat after{};
+            if (!sealed && (::fstat(input, &after) || after.st_size != stat.st_size ||
+                            after.st_mtim.tv_sec != stat.st_mtim.tv_sec ||
+                            after.st_mtim.tv_nsec != stat.st_mtim.tv_nsec))
+                return {DecodeCode::Unreadable, {}, {0, 0}, "Stream changed during frame capture"};
+            return std::move(*video);
+        }
         return {DecodeCode::SourceLimit, {}, {0, 0}, "Source exceeds 256 MiB"};
-    auto result = decodeWithVips(input, output, spec, stat.st_size);
+    }
+    if (!sealed)
+        return {DecodeCode::Unreadable, {}, {0, 0}, "Image sources must be sealed"};
+    auto result = decodeImage(input, output, spec, stat.st_size);
     if (result.code == DecodeCode::Unsupported)
         if (auto video = decodeVideo(input, output, spec))
             return std::move(*video);
@@ -26,12 +41,13 @@ Imv::DecodeReport decodeInput(int input, int output, const Imv::DecodeSpec &spec
 }
 } // namespace
 
-int main(int, char **argv) {
+int main(int argc, char **argv) {
     constexpr rlim_t addressBudget = 1024ull * 1024 * 1024;
     const rlimit address{addressBudget, addressBudget};
     const rlimit noCore{0, 0};
     if (::setrlimit(RLIMIT_AS, &address) != 0 || ::setrlimit(RLIMIT_CORE, &noCore) != 0)
         return 2;
+    const QCoreApplication application(argc, argv);
     if (!Imv::initializeVips(argv[0]))
         return 3;
     // Deadline enforcement must not depend on the Qt GUI event loop.

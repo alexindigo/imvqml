@@ -13,6 +13,72 @@ using namespace Imv;
 class StoreTest : public QObject {
     Q_OBJECT
 private slots:
+    void evictionCompletion_data() {
+        QTest::addColumn<bool>("all");
+        QTest::addColumn<bool>("contended");
+        QTest::newRow("clear") << true << false;
+        QTest::newRow("invalidate under lock") << false << true;
+    }
+
+    void evictionCompletion() {
+        QFETCH(bool, all);
+        QFETCH(bool, contended);
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        ImvCache policy;
+        policy.setDirectory(QUrl::fromLocalFile(directory.path()));
+        const auto source = QUrl::fromLocalFile(IMV_FIXTURES "/palette.png");
+        QFile encoded(source.toLocalFile());
+        QVERIFY(encoded.open(QIODevice::ReadOnly));
+        const auto digest =
+            QCryptographicHash::hash(encoded.readAll(), QCryptographicHash::Sha256).toHex();
+        const auto filename = [&](const QByteArray &hash) {
+            return QDir(directory.path()).filePath(hash + '-' + QByteArray(64, 'a') + ".imvqoi");
+        };
+        const auto target = filename(digest);
+        const auto unrelated = filename(QByteArray(64, 'b'));
+        for (const auto &path : {target, unrelated}) {
+            QFile input(path);
+            QVERIFY(input.open(QIODevice::WriteOnly));
+        }
+        QLockFile other(QDir(directory.path()).filePath(".imvqml.lock"));
+        if (contended)
+            QVERIFY(other.tryLock(0));
+        bool targetGoneAtSignal = false;
+        bool unrelatedGoneAtSignal = false;
+        const auto meta = policy.metaObject();
+        const auto signal = meta->indexOfSignal("cleared(int,QVariantMap)");
+        QVERIFY2(signal >= 0, "No completion signal: the caller cannot observe actual eviction");
+        QSignalSpy done(&policy, meta->method(signal));
+        const auto method = meta->method(meta->indexOfMethod(all ? "clear()" : "invalidate(QUrl)"));
+        QCOMPARE(method.returnType(), int(QMetaType::Int));
+        connect(&policy, &ImvCache::cleared, this, [&] {
+            targetGoneAtSignal = !QFileInfo::exists(target);
+            unrelatedGoneAtSignal = !QFileInfo::exists(unrelated);
+        });
+        int ticket = 0;
+        QVERIFY(all ? method.invoke(&policy, Qt::DirectConnection, Q_RETURN_ARG(int, ticket))
+                    : method.invoke(&policy, Qt::DirectConnection, Q_RETURN_ARG(int, ticket),
+                                    Q_ARG(QUrl, source)));
+        QVERIFY(ticket > 0);
+        QVERIFY(done.isEmpty());
+        if (contended) {
+            QTest::qWait(300);
+            QVERIFY(done.isEmpty());
+            QVERIFY(QFileInfo::exists(target));
+            other.unlock();
+        }
+        QTRY_COMPARE(done.size(), 1);
+        QCOMPARE(done.first().at(0).toInt(), ticket);
+        const auto report = done.first().at(1).toMap();
+        QCOMPARE(report.value("stage").toString(), "complete");
+        QCOMPARE(report.value("removed").toInt(), all ? 2 : 1);
+        QCOMPARE(report.value("kept").toInt(), 0);
+        QCOMPARE(report.value("failed").toInt(), 0);
+        QVERIFY(targetGoneAtSignal);
+        QCOMPARE(unrelatedGoneAtSignal, all);
+    }
+
     void pixelsInvalidationAndThumbnails() {
         QTemporaryDir directory;
         QVERIFY(directory.isValid());
@@ -54,7 +120,11 @@ private slots:
         });
         QTRY_VERIFY(checked);
 
-        policy.invalidate(source);
+        interest.reset();
+        asset.reset();
+        QSignalSpy eviction(&policy, &ImvCache::cleared);
+        QVERIFY(policy.invalidate(source) > 0);
+        QTRY_COMPARE(eviction.size(), 1);
         interest = request();
         QTRY_VERIFY(asset);
         QCOMPARE(pipeline.submissions(), 2u);
@@ -66,7 +136,10 @@ private slots:
         interest = request();
         QTRY_VERIFY(asset);
         QCOMPARE(pipeline.submissions(), 3u);
-        policy.clear();
+        interest.reset();
+        asset.reset();
+        QVERIFY(policy.clear() > 0);
+        QTRY_COMPARE(eviction.size(), 2);
         QTRY_VERIFY(files().isEmpty());
         policy.setEnabled(false);
 
@@ -162,28 +235,39 @@ private slots:
         store.publish(a, value);
         store.publish(b, value);
         QTRY_VERIFY(QFileInfo::exists(a.path) && QFileInfo::exists(b.path));
+        a.lease.reset();
 
         QLockFile other(QDir(directory.path()).filePath(".imvqml.lock"));
         QVERIFY(other.tryLock(0));
+        std::optional<ImageStore::Eviction> completion;
+        auto done = [&](ImageStore::Eviction result) { completion = std::move(result); };
         if (all)
-            store.clear();
+            store.clear(done);
         else
-            store.invalidate(input('a'));
+            store.invalidate(input('a'), done);
         // An observed lookup is a barrier behind the locked invalidation;
         // release the other owner's lock only after that operation has run.
         bool settled = false;
         store.lookup(input('a'), spec, [&](ImageStore::Lookup) { settled = true; });
         QTRY_VERIFY(settled);
+        QVERIFY(!completion);
         other.unlock();
+        QTRY_VERIFY(completion);
+        QCOMPARE(completion->removed, 1);
+        QCOMPARE(completion->kept, all ? 1 : 0);
+        QCOMPARE(completion->failed, 0);
+        QVERIFY(!completion->error);
+        QVERIFY(!QFileInfo::exists(a.path));
+        QVERIFY(QFileInfo::exists(b.path));
 
         std::optional<bool> staleA, staleB;
         store.lookup(input('a'), spec, [&](ImageStore::Lookup r) { staleA = bool(r.value); });
         store.lookup(input('b'), spec, [&](ImageStore::Lookup r) { staleB = bool(r.value); });
         QTRY_VERIFY(staleA.has_value() && staleB.has_value());
         QCOMPARE(*staleA, false);
-        QCOMPARE(*staleB, !all);
+        QCOMPARE(*staleB, true);
         QVERIFY(!QFileInfo::exists(a.path));
-        QCOMPARE(QFileInfo::exists(b.path), !all);
+        QVERIFY(QFileInfo::exists(b.path));
     }
 
     void evictionHonorsLease() {

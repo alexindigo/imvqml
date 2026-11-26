@@ -23,3 +23,8 @@ foreach(path IN ITEMS "@CMAKE_INSTALL_LIBEXECDIR@/imvqml-decoder"
     endif()
 endforeach()
 message(STATUS "Local imvqml archive contains the runtime, helper, QML and CMake metadata, headers and notices")
+file(ARCHIVE_EXTRACT INPUT "${work}/imvqml-check.tar.gz" DESTINATION "${work}")
+file(SHA256 "${work}/imvqml-check.tar.gz" archive_hash)
+message(STATUS "CPack probe archive SHA256 ${archive_hash}")
+execute_process(COMMAND "${CMAKE_COMMAND}" "-DARTIFACT_PREFIX=${work}/imvqml-check"
+    -DPIXELS=ON -P "@CMAKE_CURRENT_BINARY_DIR@/relocate.cmake" COMMAND_ERROR_IS_FATAL ANY)

@@ -19,9 +19,9 @@ int main(int argc, char **argv) {
     QFile fixture(QFile::decodeName(argv[3]));
     if (!fixture.open(QIODevice::WriteOnly))
         return 3;
-    fixture.write(
-        "<svg xmlns='http://www.w3.org/2000/svg' width='128' height='64'>"
-        "<path fill='#f00' d='M0 0h64v64H0z'/><path fill='#0f0' d='M64 0h64v64H64z'/></svg>");
+    fixture.write("<svg xmlns='http://www.w3.org/2000/svg' width='128' height='64'>"
+                  "<path fill='#f00' d='M0 0h32v64H0z'/>"
+                  "<path fill='#0f0' fill-opacity='0.5' d='M32 0h48v64H32z'/></svg>");
     fixture.close();
     QQmlEngine engine;
     engine.addImportPath(QFile::decodeName(argv[1]));
@@ -34,7 +34,11 @@ int main(int argc, char **argv) {
             required property url fixture
             property alias status: picture.status
             property alias errorCode: picture.errorCode
-            ImvImage { id: picture; width: 128; height: 64; source: fixture; smooth: false }
+            property color foreground: "yellow"
+            ImvImage {
+                id: picture; width: 128; height: 64; source: fixture
+                smooth: false; tint: foreground
+            }
         }
     )",
                       QUrl());
@@ -65,13 +69,16 @@ int main(int argc, char **argv) {
         const auto image = window->grabWindow();
         if (image.isNull())
             return;
-        const auto scale = image.devicePixelRatio();
+        const auto scale = qreal(image.width()) / window->width();
         const auto pixel = [&](int x, int y) {
             return image.pixelColor(qRound(x * scale), qRound(y * scale));
         };
-        if (pixel(32, 32) == QColor(Qt::red) && pixel(96, 32) == QColor(Qt::green) &&
-            pixel(140, 32) == QColor(Qt::blue)) {
-            qInfo("Relocated QML item presented red, green and background pixels");
+        const auto blend = pixel(56, 32);
+        if (pixel(16, 32) == QColor(Qt::yellow) && qAbs(blend.red() - 128) <= 2 &&
+            qAbs(blend.green() - 128) <= 2 && qAbs(blend.blue() - 127) <= 2 &&
+            pixel(96, 32) == QColor(Qt::blue) && pixel(140, 32) == QColor(Qt::blue)) {
+            qInfo("Installed QML item presented tinted opaque and half-alpha pixels plus clear "
+                  "coverage");
             app.quit();
         }
     });

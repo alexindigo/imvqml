@@ -18,7 +18,13 @@ consumers against a moved install prefix. Bubblewrap overlays both original
 trees with empty read-only directories. The probes check the relocated
 paths in `/proc/self/maps` and exact decoded or rendered pixels. The QML
 consumers link Qt only, not imvqml. `package-metadata` checks the local CPack
-archive inventory. `jobs` uses generated fixture files and no display.
+archive inventory, then runs the headless consumers on the extracted archive.
+Use `cmake -DARTIFACT_PREFIX=/absolute/prefix -DPIXELS=ON -DWAYLAND=ON
+-P build/tests/relocate.cmake` on one line to run these probes against a
+package prefix outside the source and build trees. Use the package's Qt
+SDK and matching GNUInstallDirs layout when configuring the probe runner.
+For split Qt SDKs, pass the SDK's imports directory as `QT_SDK_QML_PATH`.
+`jobs` uses generated fixture files and no display.
 `pipeline` proves that dropping a listener after admission does not deliver a
 stale outcome or cancel another listener's still-active request.
 
@@ -30,10 +36,13 @@ Private counters prove decode and texture sharing and reuse.
 The same two lanes check exact GIF/WebP frame delays, elapsed playback and
 finite loops, and dedicated playback-helper pause/resume with a large GIF.
 
-When mpv headers and its runtime DSO are both installed, the video tests
-also need FFmpeg with libvpx and libx264 encoders. They generate their own
-seek and rotation fixtures; two isolated tests inject a native abort and
-hide the actual runtime library, respectively.
+Use `-DIMV_REQUIRE_VIDEO_TESTS=ON` in release verification to prevent a
+missing runtime from silently dropping the native tests. It also accepts
+the explicit `IMV_MPV_RUNTIME_HINT` used by the decoder. The tests need
+FFmpeg with libvpx and libx264 for seek and rotation fixtures. Isolated
+tests replace or hide the runtime and verify startup errors, native abort,
+the helper watchdog, and continued still-image decoding. With
+`IMV_ENABLE_VIDEO=OFF`, `video-disabled` checks the compile-time opt-out.
 
 To rerun the persistent-format measurement inside the guest niri session,
 use `QT_QPA_PLATFORM=wayland build/tests/imv-store-benchmark` with the

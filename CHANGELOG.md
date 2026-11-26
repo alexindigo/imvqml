@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.1] - 2026-11-26
+
+### Fix
+
+`ImvImage` stays loading during bursts instead of failing with `busy`.
+The pipeline prioritizes visible items, drops superseded requests, and
+reports `deadline` when queued work times out or cannot fit. Thumbnail export
+also queues for writer capacity. Explicit `ImvImageJob` calls still return
+`-2` when busy.
+
+- Queue image display and thumbnail admission (`ba1dd65`).
+
 ## [0.1.0] - 2026-11-26
 
 ### Fix

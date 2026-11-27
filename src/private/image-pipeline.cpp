@@ -43,7 +43,7 @@ ImagePipeline::Interest ImagePipeline::requestExplicit(DecodeSpec spec, Done don
 }
 
 void ImagePipeline::captured(const Interest &interest,
-                             std::variant<CapturedSource, ProviderSnapshot> input) {
+                             std::variant<CapturedSource, ProviderSnapshot, Failure> input) {
     auto request = interest ? interest->pending.lock() : nullptr;
     if (!request || request->phase != Capturing || !m_queue.contains(request))
         return;
@@ -51,10 +51,14 @@ void ImagePipeline::captured(const Interest &interest,
         finish(request, {{}, {}, expired()});
         return;
     }
+    if (auto *provider = std::get_if<ProviderSnapshot>(&input); provider && provider->error) {
+        finish(request, {{}, {}, std::move(provider->error)});
+        return;
+    }
     std::visit(
         [&](auto &&captured) {
-            if (captured.error) {
-                finish(request, {{}, {}, std::move(captured.error)});
+            if constexpr (std::is_same_v<std::decay_t<decltype(captured)>, Failure>) {
+                finish(request, {{}, {}, std::move(captured)});
             } else {
                 request->source = std::move(captured);
                 request->phase = Waiting;
@@ -100,7 +104,7 @@ void ImagePipeline::setVisible(const Interest &interest, bool visible) {
 
 void ImagePipeline::opened(const std::shared_ptr<Pending> &request, OpenedSource source) {
     request->preparing.reset();
-    request->source = PreparationInput{};
+    request->source = SourceInput{};
     if (request->deadline.hasExpired()) {
         finish(request, {{}, {}, expired()});
         return;
@@ -232,7 +236,7 @@ void ImagePipeline::pump() {
             auto decoded = next->kind == Explicit::RetainOriginal
                                ? Decoded{{"png", provider->original}, std::move(provider->pixels)}
                                : rasterizeProvider(*provider, next->spec);
-            next->source = PreparationInput{};
+            next->source = SourceInput{};
             finish(next, std::move(decoded));
         } else if (auto *input = std::get_if<OpenedSource>(&next->source)) {
             // Consume the variant before opened() clears it or changes phase.
@@ -240,7 +244,7 @@ void ImagePipeline::pump() {
             opened(next, std::move(source));
         } else {
             next->preparing = prepareSource(
-                std::get<PreparationInput>(next->source),
+                std::get<SourceInput>(next->source),
                 [self = QPointer(this), weak = std::weak_ptr(next)](OpenedSource source) {
                     if (const auto active = weak.lock();
                         self && active && self->m_queue.contains(active)) {
@@ -250,7 +254,7 @@ void ImagePipeline::pump() {
                 });
             if (next->preparing) {
                 next->phase = Preparing;
-                next->source = PreparationInput{};
+                next->source = SourceInput{};
             } else {
                 sourceBusy = true;
             }

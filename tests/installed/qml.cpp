@@ -41,6 +41,8 @@ int main(int argc, char **argv) {
         ImvImageJob {
             required property url fixture
             required property url destinationDirectory
+            property bool refusedSynchronously: false
+            property bool unexpectedSignal: false
             property int ticket: 0
             property int retainedTicket: 0
             property string outcomeStage
@@ -51,6 +53,11 @@ int main(int argc, char **argv) {
             property string rgbaHex
             property var retained
             Component.onCompleted: {
+                const refused = retainOriginal(Qt.resolvedUrl(fixture + ".missing"),
+                                               destinationDirectory)
+                refusedSynchronously = refused === ImvImageJob.UnreadableSource
+                    && lastErrorStage === "open" && lastErrorCode === "unreadable"
+                    && lastErrorDetail.length > 0
                 ticket = sample(fixture, 2, 1)
                 retainedTicket = retainOriginal(fixture, destinationDirectory)
             }
@@ -67,6 +74,8 @@ int main(int argc, char **argv) {
                         for (const byte of new Uint8Array(value.rgba))
                             rgbaHex += ("0" + byte.toString(16)).slice(-2)
                     }
+                } else {
+                    unexpectedSignal = true
                 }
                 if (retained !== undefined && outcomeStage !== "") Qt.quit()
             }
@@ -89,13 +98,15 @@ int main(int argc, char **argv) {
     }
     if (!pixels)
         return 0;
-    if (object->property("ticket").toInt() <= 0 ||
+    if (!object->property("refusedSynchronously").toBool() ||
+        object->property("ticket").toInt() <= 0 ||
         object->property("retainedTicket").toInt() <= 0 || !fixture.remove())
         return 7;
     QObject::connect(&engine, &QQmlEngine::quit, &app, &QCoreApplication::quit);
     if (const int rc = app.exec(); rc != 0)
         return rc;
-    if (!object->property("outcomeCode").toString().isEmpty() ||
+    if (object->property("unexpectedSignal").toBool() ||
+        !object->property("outcomeCode").toString().isEmpty() ||
         object->property("sampleWidth").toInt() != 2 ||
         object->property("sampleHeight").toInt() != 1 ||
         object->property("rgbaHex").toString() != "ff0000ff00ff00ff") {

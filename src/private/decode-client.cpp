@@ -12,6 +12,7 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <system_error>
 #include <unistd.h>
 
 namespace Imv {
@@ -33,7 +34,7 @@ OpenedSource fail(QString stage, QString code, QString detail) {
 
 using Mapping = std::shared_ptr<const uchar>;
 struct SourceTask {
-    PreparationInput input;
+    SourceInput input;
     SourceReady ready;
     std::atomic_bool live{true};
 };
@@ -173,23 +174,30 @@ QString localPath(const QUrl &url) {
     return path.contains(QChar::Null) ? QString{} : path;
 }
 
-CapturedSource captureSource(const QUrl &url, SourceLimit limit) {
+CaptureResult captureSource(const QUrl &url, SourceLimit limit) {
     if (url.scheme() == "data")
-        return {url, {}, {}, {}, limit};
+        return CapturedSource{url, {}, {}, limit};
     const auto path = localPath(url);
     if (path.isEmpty())
-        return {{},
-                {},
-                {},
-                {"admission", "invalid-source",
-                 "Only local paths, file URLs and data URLs are supported here"}};
+        return Failure{"admission", "invalid-source",
+                       "Only local paths, file URLs and data URLs are supported here"};
+    const auto unreadable = [](QString action, int error) {
+        return Failure{
+            "open", "unreadable",
+            action + QStringLiteral(": ") +
+                QString::fromStdString(std::error_code(error, std::generic_category()).message())};
+    };
     Fd fd(::open(QFile::encodeName(path).constData(), O_RDONLY | O_CLOEXEC | O_NONBLOCK));
+    if (!fd)
+        return unreadable("Cannot open source", errno);
     struct stat info{};
-    if (!fd || ::fstat(fd.get(), &info) != 0 || !S_ISREG(info.st_mode))
-        return {{}, {}, {}, {"open", "unreadable", "Cannot open a readable regular file"}};
+    if (::fstat(fd.get(), &info) != 0)
+        return unreadable("Cannot stat source", errno);
+    if (!S_ISREG(info.st_mode))
+        return Failure{"open", "unreadable", "Source is not a regular file"};
     if (limit == SourceLimit::Strict && info.st_size > MaxSourceBytes)
-        return {{}, {}, {}, {"admission", "too-large", "Source exceeds 256 MiB"}};
-    return {{}, std::move(fd), info, {}, limit};
+        return Failure{"admission", "too-large", "Source exceeds 256 MiB"};
+    return CapturedSource{{}, std::make_shared<Fd>(std::move(fd)), info, limit};
 }
 
 namespace {
@@ -198,12 +206,10 @@ bool sameContentStat(const struct stat &a, const struct stat &b) {
            a.st_mtim.tv_nsec == b.st_mtim.tv_nsec;
 }
 
-OpenedSource materialize(CapturedSource source) {
-    if (source.error)
-        return {{}, {}, std::move(source.error)};
+OpenedSource materialize(const CapturedSource &source) {
     if (!source.fd)
         return openData(source.data, source.limit);
-    const auto &fd = source.fd;
+    const auto &fd = *source.fd;
     const auto &info = source.file;
     // Rename/unlink can change ctime without changing the owned file's pixels.
     struct stat before{};
@@ -217,8 +223,12 @@ OpenedSource materialize(CapturedSource source) {
     // A disk video can be arbitrarily large. Only the helper identifies and
     // streams over-limit files; it never sends an unsealed input to an image
     // reader. The persistent store already skips hashing over-limit inputs.
-    if (info.st_size > MaxSourceBytes)
-        return {std::move(source.fd), std::move(identity), {}, info};
+    if (info.st_size > MaxSourceBytes) {
+        auto owned = duplicateSource(fd);
+        if (!owned)
+            return fail("open", "unreadable", "Could not duplicate the opened source");
+        return {std::move(owned), std::move(identity), {}, info};
+    }
     auto snapshot = newMemfd("imvqml-file-source");
     if (!snapshot)
         return fail("open", "unreadable", "Could not create a source snapshot");
@@ -245,7 +255,12 @@ OpenedSource materialize(CapturedSource source) {
 }
 } // namespace
 
-OpenedSource openSource(const QUrl &url) { return materialize(captureSource(url)); }
+OpenedSource openSource(const QUrl &url) {
+    const auto source = captureSource(url);
+    if (const auto *error = std::get_if<Failure>(&source))
+        return {{}, {}, *error};
+    return materialize(std::get<CapturedSource>(source));
+}
 
 OpenedSource openSource(const QByteArray &bytes) {
     if (bytes.size() > MaxSourceBytes &&
@@ -260,7 +275,7 @@ OpenedSource openSource(const QByteArray &bytes) {
             {}};
 }
 
-std::shared_ptr<void> prepareSource(PreparationInput &input, SourceReady ready) {
+std::shared_ptr<void> prepareSource(SourceInput &input, SourceReady ready) {
     auto &service = sourceWorker();
     constexpr int SourceCapacity = 4;
     if (service.outstanding >= SourceCapacity)
@@ -272,10 +287,9 @@ std::shared_ptr<void> prepareSource(PreparationInput &input, SourceReady ready) 
         OpenedSource result;
         if (task && task->live) {
             if (auto *captured = std::get_if<CapturedSource>(&task->input))
-                result = materialize(std::move(*captured));
+                result = materialize(*captured);
             else
-                result = std::visit([](const auto &input) { return openSource(input); },
-                                    std::get<SourceInput>(task->input));
+                result = openSource(std::get<QByteArray>(task->input));
             task->input = SourceInput{};
         }
         QMetaObject::invokeMethod(

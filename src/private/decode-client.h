@@ -37,20 +37,19 @@ QString localPath(const QUrl &url);
 enum class SourceLimit { Decode, Strict };
 struct CapturedSource {
     QUrl data;
-    Fd fd;
+    std::shared_ptr<const Fd> fd;
     struct stat file{};
-    Failure error;
     SourceLimit limit = SourceLimit::Decode;
 };
-CapturedSource captureSource(const QUrl &url, SourceLimit limit = SourceLimit::Decode);
+using CaptureResult = std::variant<CapturedSource, Failure>;
+CaptureResult captureSource(const QUrl &url, SourceLimit limit = SourceLimit::Decode);
 OpenedSource openSource(const QUrl &url);
 OpenedSource openSource(const QByteArray &bytes);
-using SourceInput = std::variant<QUrl, QByteArray>;
-using PreparationInput = std::variant<SourceInput, CapturedSource>;
+using SourceInput = std::variant<QByteArray, CapturedSource>;
 using SourceReady = std::function<void(OpenedSource)>;
 // Empty means admission was busy; destroying a live handle revokes delivery
 // and releases a source that has not entered the worker yet.
-std::shared_ptr<void> prepareSource(PreparationInput &input, SourceReady ready);
+std::shared_ptr<void> prepareSource(SourceInput &input, SourceReady ready);
 void onSourceCapacity(QObject *receiver, std::function<void()> released);
 Pool &decoderPool();
 Fd duplicateSource(const Fd &fd);

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 cmake_minimum_required(VERSION 3.24)
-project(imvqml VERSION 0.1.4 LANGUAGES CXX)
+project(imvqml VERSION 0.1.5 LANGUAGES CXX)
 
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
     message(FATAL_ERROR "imvqml requires Linux descriptor passing and shared memory")

@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.5] - 2026-11-26
+
+### Feature
+
+Applications can retain temporary images without reading them on the GUI
+thread or re-encoding them. `ImvImageJob.retainOriginal` owns the file
+descriptor at call time, so unlinking or replacing the source path does not
+change the bytes it saves. The cancellable job publishes without overwriting
+and returns the path, byte count, SHA-256, and detected format.
+
+- Retain original encoded images (`f82f47f`, merged in `5046320`).
+
 ## [0.1.4] - 2026-11-26
 
 ### Fix

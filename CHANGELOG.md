@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.1.6] - 2026-11-26
+
+### Fix
+
+Image jobs now return an immediate negative result and readable last error
+when they can refuse a request at call time. A missing or unreadable local
+file no longer appears to be loading in `ImvImage`, and consumers can reject
+it before showing a pending job. Accepted requests still decode asynchronously.
+
+- Refuse image sources synchronously (`3025c42`, merged in `e630e72`).
+
 ## [0.1.5] - 2026-11-26
 
 ### Feature

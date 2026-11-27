@@ -3,6 +3,7 @@
 #include "helper.h"
 #include <QProcess>
 #include <QtTest>
+#include <cerrno>
 #include <imvqml/imvimagejob.h>
 #include <poll.h>
 #include <sys/syscall.h>
@@ -61,7 +62,9 @@ private slots:
                            position) > 0);
         QTRY_COMPARE_WITH_TIMEOUT(done.size(), 1, 9000);
         const auto result = done.first().at(1).toMap();
-        QCOMPARE(result.value("code").toString(), QString());
+        QVERIFY2(result.value("code").toString().isEmpty(),
+                 qPrintable(result.value("detail").toString()));
+        QVERIFY(result.value("detail").toString().isEmpty());
         const auto rgba = result.value("rgba").toByteArray();
         QCOMPARE(result.value("width").toInt(), size.width());
         QCOMPARE(result.value("height").toInt(), size.height());
@@ -88,10 +91,35 @@ private slots:
         QVERIFY(job.sample(QUrl::fromLocalFile(IMV_FIXTURES "/seek.webm"), 128, 128) > 0);
         QTRY_COMPARE_WITH_TIMEOUT(done.size(), 1, 9000);
         const auto video = done.takeFirst().at(1).toMap();
-        if (mode != "fault") {
+        const auto detail = video.value("detail").toString();
+        if (mode == "diagnostics") {
+            QCOMPARE(video.value("stage").toString(), "decode");
+            QCOMPARE(video.value("code").toString(), "invalid-image");
+            QVERIFY(detail.contains("native=mpv_command_async(loadfile)"));
+            QVERIFY(detail.contains("mpv=-20 (injected failure)"));
+            QVERIFY(detail.contains(QStringLiteral("errno=%1").arg(ENOMEM)));
+            QVERIFY(QRegularExpression("VmPeak=[1-9][0-9]* kB").match(detail).hasMatch());
+            QVERIFY(!detail.contains("warning-1"));
+            QVERIFY(!detail.contains("warning-2"));
+            const auto lines = detail.split('\n');
+            QCOMPARE(lines.size(), 6);
+            for (int i = 1; i < lines.size(); ++i) {
+                QVERIFY(lines[i].startsWith(QStringLiteral("fake/warn: warning-%1 ").arg(i + 2)));
+                QCOMPARE(lines[i].size(), 119);
+            }
+        } else if (mode != "fault") {
             QCOMPARE(video.value("stage").toString(), "inspect");
             QCOMPARE(video.value("code").toString(), "unsupported-format");
-            QCOMPARE(video.value("detail").toString(), "video-support-unavailable");
+            if (mode == "missing")
+                QCOMPARE(detail, "video-support-unavailable");
+            else {
+                const QByteArray call = mode == "options"
+                                            ? "mpv_set_option_string(access-references)"
+                                        : mode == "initialize" ? "mpv_initialize"
+                                                               : "mpv_render_context_create";
+                QVERIFY2(detail.startsWith("video-support-unavailable; native=" + call),
+                         qPrintable(detail));
+            }
         } else {
             QCOMPARE(video.value("stage").toString(), "helper");
             QCOMPARE(video.value("code").toString(), "helper-crashed");
@@ -116,6 +144,8 @@ private slots:
         const auto result = done.first().at(1).toMap();
         QCOMPARE(result.value("stage").toString(), "decode");
         QCOMPARE(result.value("code").toString(), "invalid-image");
+        QVERIFY2(result.value("detail").toString().contains("MPV_EVENT_END_FILE(loadfile)"),
+                 qPrintable(result.value("detail").toString()));
     }
 };
 

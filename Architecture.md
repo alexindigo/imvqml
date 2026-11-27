@@ -49,7 +49,21 @@ the remaining seals before a successful reply. Inspect has no output descriptor.
 A pixel reply is accepted only when its geometry, all seals and the exact
 descriptor size agree. A read-only mapping
 backs the owned frame value; the caller does not decode a PNG or WebP.
-The pool's still deadline is 8 seconds and helper address space is 1 GiB.
+The pool's still deadline is 8 seconds. The helper enforces a 1.5 GiB virtual
+address-space ceiling. Before any backend starts, it limits glibc to two
+malloc arenas (one main arena and at most one additional arena), independent
+of CPU count. An additional arena can reserve 64 MiB per heap on 64-bit glibc,
+even when very little of it is resident. Arenas can grow additional heaps;
+the address-space ceiling still applies.
+
+The ceiling budgets 640 MiB for runtime mappings, thread stacks and
+allocator reservations; 512 MiB for two simultaneous 8192 x 8192 RGBA8
+work buffers (e.g. a captured frame and its rotated copy); 256 MiB for
+native decoder working buffers; and 128 MiB of headroom. Output memfds
+are written directly, not mapped into the helper. These are planning
+allowances, not separate allocator quotas or a promise that every
+codec/profile can decode up to the pixel cap. Codec reference frames and
+allocator growth still have to fit under the ceiling.
 
 `ImvImageJob` maps client IDs to interests in the shared pipeline ledger and
 separates inspect, sample and render results. One-shot jobs neither coalesce
@@ -158,7 +172,8 @@ The helper probes a bounded container signature after image recognition
 fails, or directly for a file above the image byte cap. Large videos only
 need an opened read-only descriptor; they bypass copying and disk caching.
 It loads libmpv dynamically and selects a restricted demuxer on
-the already-open descriptor. The transaction independently correlates the
+the already-open descriptor. The software decoder requests one codec thread
+rather than inheriting libavcodec's CPU-dependent default. The transaction independently correlates the
 native command reply and the load or seek event followed by playback restart.
 The software renderer sees unrotated input; the helper uses source metadata
 to orient pixels before publishing the same sealed RGBA result as stills.

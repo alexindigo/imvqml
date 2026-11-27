@@ -45,7 +45,7 @@ set_target_properties(imv-mpv-fault PROPERTIES OUTPUT_NAME mpv SOVERSION 2
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/fault-mpv")
 set(video_env "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/video-runtime.py"
     "${BWRAP}" "${imv_mpv_runtime}" "$<TARGET_FILE:imv-video-test>")
-foreach(mode IN ITEMS missing options initialize software fault watchdog)
+foreach(mode IN ITEMS missing options initialize software diagnostics fault watchdog)
     add_test(NAME video-native-${mode} COMMAND ${video_env} "${mode}" "$<TARGET_FILE:imv-mpv-fault>")
     set_tests_properties(video-native-${mode} PROPERTIES FIXTURES_REQUIRED videos TIMEOUT 35)
 endforeach()

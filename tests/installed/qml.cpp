@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 #include "probe.h"
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
 #include <QQmlComponent>
@@ -29,32 +30,45 @@ int main(int argc, char **argv) {
             "<path fill='#f00' d='M0 0h1v1H0z'/><path fill='#0f0' d='M1 0h1v1H1z'/></svg>") <= 0)
         return 2;
     fixture.close();
+    if (!fixture.open(QIODevice::ReadOnly))
+        return 2;
+    const auto original = fixture.readAll();
+    fixture.close();
     QTimer::singleShot(4000, &app, [&] { app.exit(3); });
     component.setData(pixels ? R"(
         import QtQml
         import ImvQml
         ImvImageJob {
             required property url fixture
+            required property url destinationDirectory
             property int ticket: 0
+            property int retainedTicket: 0
             property string outcomeStage
             property string outcomeCode
             property string outcomeDetail
             property int sampleWidth
             property int sampleHeight
             property string rgbaHex
-            Component.onCompleted: ticket = sample(fixture, 2, 1)
+            property var retained
+            Component.onCompleted: {
+                ticket = sample(fixture, 2, 1)
+                retainedTicket = retainOriginal(fixture, destinationDirectory)
+            }
             onFinished: (id, value) => {
-                if (id !== ticket) return
-                outcomeStage = value.stage ?? ""
-                outcomeCode = value.code ?? ""
-                outcomeDetail = value.detail ?? ""
-                sampleWidth = value.width ?? 0
-                sampleHeight = value.height ?? 0
-                if (value.rgba !== undefined) {
-                    for (const byte of new Uint8Array(value.rgba))
-                        rgbaHex += ("0" + byte.toString(16)).slice(-2)
+                if (id === retainedTicket) {
+                    retained = value
+                } else if (id === ticket) {
+                    outcomeStage = value.stage ?? ""
+                    outcomeCode = value.code ?? ""
+                    outcomeDetail = value.detail ?? ""
+                    sampleWidth = value.width ?? 0
+                    sampleHeight = value.height ?? 0
+                    if (value.rgba !== undefined) {
+                        for (const byte of new Uint8Array(value.rgba))
+                            rgbaHex += ("0" + byte.toString(16)).slice(-2)
+                    }
                 }
-                Qt.quit()
+                if (retained !== undefined && outcomeStage !== "") Qt.quit()
             }
         }
     )"
@@ -62,7 +76,8 @@ int main(int argc, char **argv) {
                       QUrl());
     std::unique_ptr<QObject> object(
         pixels ? component.createWithInitialProperties(
-                     {{"fixture", QUrl::fromLocalFile(fixture.fileName())}})
+                     {{"fixture", QUrl::fromLocalFile(fixture.fileName())},
+                      {"destinationDirectory", QUrl::fromLocalFile(fixtures.path())}})
                : component.create());
     if (!object) {
         qCritical().noquote() << component.errorString();
@@ -74,7 +89,8 @@ int main(int argc, char **argv) {
     }
     if (!pixels)
         return 0;
-    if (object->property("ticket").toInt() <= 0)
+    if (object->property("ticket").toInt() <= 0 ||
+        object->property("retainedTicket").toInt() <= 0 || !fixture.remove())
         return 7;
     QObject::connect(&engine, &QQmlEngine::quit, &app, &QCoreApplication::quit);
     if (const int rc = app.exec(); rc != 0)
@@ -89,6 +105,17 @@ int main(int argc, char **argv) {
                      qPrintable(object->property("outcomeCode").toString()),
                      qPrintable(object->property("outcomeDetail").toString()));
         return 8;
+    }
+    const auto retained = object->property("retained").toMap();
+    QFile retainedFile(retained.value("path").toString());
+    if (retained.value("stage").toString() != "complete" ||
+        retained.value("format").toString() != "svg" ||
+        retained.value("size").toLongLong() != original.size() ||
+        retained.value("sha256").toByteArray() !=
+            QCryptographicHash::hash(original, QCryptographicHash::Sha256).toHex() ||
+        !retainedFile.open(QIODevice::ReadOnly) || retainedFile.readAll() != original) {
+        qCritical() << "Installed retention did not preserve the unlinked SVG:" << retained;
+        return 9;
     }
     return 0;
 }

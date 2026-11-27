@@ -66,12 +66,15 @@ codec/profile can decode up to the pixel cap. Codec reference frames and
 allocator growth still have to fit under the ceiling.
 
 `ImvImageJob` maps client IDs to interests in the shared pipeline ledger and
-separates inspect, sample and render results. One-shot jobs neither coalesce
+separates inspect, sample, render and original-retention results. One-shot jobs neither coalesce
 nor use the display cache. The dispatcher limits active one-shot processing
 to two slots, including a live render's worker encoding and publication;
 slot pressure never rejects a call. Export stages in a descriptor-held
 directory and a single cancellation/publication gate precedes `linkat`
-no-clobber commit.
+no-clobber commit. Retention inspects the sealed encoded snapshot and holds
+that same descriptor through publication, so reported format and retained
+bytes cannot come from different source revisions. Source capture checks
+the strict byte limit before transferring the local descriptor to the queue.
 
 ## Display
 

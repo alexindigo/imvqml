@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 #include "export.h"
+#include "image-pipeline.h"
 #include <imvqml/imvimagejob.h>
 
+#include <QCryptographicHash>
 #include <QFile>
 #include <QImage>
 #include <QScopeGuard>
@@ -10,6 +12,7 @@
 #include <QThreadPool>
 #include <QtTest>
 #include <limits>
+#include <sys/stat.h>
 
 namespace {
 using Imv::ImvImageJob;
@@ -30,6 +33,18 @@ void observeStage(Imv::Publication phase, const QString &path) {
 }
 
 QUrl fixture(QString name) { return QUrl::fromLocalFile(QStringLiteral(IMV_FIXTURES "/") + name); }
+
+int retain(ImvImageJob &job, const QUrl &source, const QString &directory) {
+    // Exercise the same invokable that QML sees, including on the pre-API tree.
+    const auto method = job.metaObject()->indexOfMethod("retainOriginal(QUrl,QUrl)");
+    if (method < 0)
+        return 0;
+    int ticket = 0;
+    job.metaObject()->method(method).invoke(&job, Qt::DirectConnection, Q_RETURN_ARG(int, ticket),
+                                            Q_ARG(QUrl, source),
+                                            Q_ARG(QUrl, QUrl::fromLocalFile(directory)));
+    return ticket;
+}
 
 QVariantMap result(QSignalSpy &spy, int id) {
     if (id <= 0 || (!spy.size() && !spy.wait(5000)) || spy.size() != 1)
@@ -187,6 +202,121 @@ private slots:
         QCOMPARE(sawKept, 1);
         QCOMPARE(sawCancelled, 1);
         QVERIFY(!QFile::exists(destination.toLocalFile()));
+    }
+
+    void retainFile_data() {
+        QTest::addColumn<bool>("replace");
+        QTest::newRow("unlink") << false;
+        QTest::newRow("replace") << true;
+    }
+
+    void retainFile() {
+        QFETCH(bool, replace);
+        ImvImageJob job;
+        QSignalSpy spy(&job, &ImvImageJob::finished);
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        QFile fixtureFile(fixture("alpha.png").toLocalFile());
+        QVERIFY(fixtureFile.open(QIODevice::ReadOnly));
+        const auto expected = fixtureFile.readAll();
+        const auto source = dir.filePath("original.jpg"); // Deliberately wrong suffix.
+        QVERIFY(fixtureFile.copy(source));
+        const int id = retain(job, QUrl::fromLocalFile(source), dir.path());
+        QVERIFY(QFile::remove(source));
+        if (replace)
+            QVERIFY(QFile::copy(fixture("palette.jpg").toLocalFile(), source));
+        QVERIFY(id > 0);
+        QVERIFY(spy.isEmpty());
+        const auto value = result(spy, id);
+        QCOMPARE(value.value("stage").toString(), "complete");
+        QCOMPARE(value.value("format").toString(), "png");
+        QCOMPARE(value.value("size").toLongLong(), expected.size());
+        QCOMPARE(value.value("sha256").toString(),
+                 QString::fromLatin1(
+                     QCryptographicHash::hash(expected, QCryptographicHash::Sha256).toHex()));
+        QFile output(value.value("path").toString());
+        QCOMPARE(QFileInfo(output).absolutePath(), dir.path());
+        QVERIFY(output.open(QIODevice::ReadOnly));
+        QCOMPARE(output.readAll(), expected);
+    }
+
+    void retainRejections() {
+        ImvImageJob job;
+        QSignalSpy spy(&job, &ImvImageJob::finished);
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const auto fifo = dir.filePath("fifo");
+        QCOMPARE(::mkfifo(QFile::encodeName(fifo).constData(), 0600), 0);
+        const auto fifoResult = result(spy, retain(job, QUrl::fromLocalFile(fifo), dir.path()));
+        QCOMPARE(fifoResult.value("stage").toString(), "open");
+        QCOMPARE(fifoResult.value("code").toString(), "unreadable");
+        const auto large = result(spy, retain(job, fixture("large-source"), dir.path()));
+        QCOMPARE(large.value("stage").toString(), "admission");
+        QCOMPARE(large.value("code").toString(), "too-large");
+        QCOMPARE(QDir(dir.path()).entryList(QDir::AllEntries | QDir::Hidden | QDir::NoDotAndDotDot),
+                 QStringList{});
+    }
+
+    void retainDataAndCancelDuringStaging() {
+        ImvImageJob job;
+        QSignalSpy spy(&job, &ImvImageJob::finished);
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        QFile input(fixture("palette.gif").toLocalFile());
+        QVERIFY(input.open(QIODevice::ReadOnly));
+        const auto bytes = input.readAll();
+        const auto source = QUrl::fromEncoded("data:image/gif;base64," + bytes.toBase64());
+        const auto value = result(spy, retain(job, source, dir.path()));
+        QCOMPARE(value.value("format").toString(), "gif");
+        QFile output(value.value("path").toString());
+        QVERIFY(output.open(QIODevice::ReadOnly));
+        QCOMPARE(output.readAll(), bytes);
+        output.close();
+        QVERIFY(output.remove());
+
+        ExportGate gate{Imv::Publication::Staging};
+        exportGate = &gate;
+        Imv::observeExports(observeStage);
+        const auto cleanup = qScopeGuard([&] {
+            gate.resume.release();
+            QThreadPool::globalInstance()->waitForDone();
+            Imv::observeExports(nullptr);
+            exportGate = nullptr;
+        });
+        const auto id = retain(job, source, dir.path());
+        QVERIFY(id > 0);
+        QTRY_VERIFY_WITH_TIMEOUT(gate.entered.available(), 3500);
+        QVERIFY(job.cancel(id));
+        gate.resume.release();
+        QCOMPARE(result(spy, id).value("code").toString(), "cancelled");
+        QCOMPARE(QDir(dir.path()).entryList(QDir::AllEntries | QDir::Hidden | QDir::NoDotAndDotDot),
+                 QStringList{});
+    }
+
+    void retainSharedQueue() {
+        ImvImageJob job;
+        QSignalSpy spy(&job, &ImvImageJob::finished);
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        QList<int> tickets;
+        for (int i = 0; i < Imv::ImagePipeline::QueueLimit - 1; ++i) {
+            const auto ticket = job.inspect(fixture("alpha.png"));
+            QVERIFY(ticket > 0);
+            tickets.append(ticket);
+        }
+        const auto id = retain(job, fixture("alpha.png"), dir.path());
+        QVERIFY(id > 0);
+        QCOMPARE(retain(job, fixture("alpha.png"), dir.path()), -2);
+        QCOMPARE(job.inspect(fixture("alpha.png")), -2);
+        QVERIFY(job.cancel(id));
+        QVERIFY(!job.cancel(id));
+        QCOMPARE(result(spy, id).value("code").toString(), "cancelled");
+        for (const auto ticket : tickets)
+            QVERIFY(job.cancel(ticket));
+        QCoreApplication::processEvents();
+        QCOMPARE(spy.size(), tickets.size());
+        QCOMPARE(QDir(dir.path()).entryList(QDir::AllEntries | QDir::Hidden | QDir::NoDotAndDotDot),
+                 QStringList{});
     }
 
     void outcomes_data() {

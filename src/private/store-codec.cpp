@@ -66,7 +66,7 @@ QByteArray encodeEntry(const Decoded &value, qint64 budget) {
     DecodeReport report;
     if (value.error) {
         if (value.error.stage != "inspect" || value.error.code != "unsupported-format" ||
-            value.error.detail == "video-support-unavailable")
+            value.error.detail.startsWith("video-support-unavailable"))
             return {};
         report.code = DecodeCode::Unsupported;
         report.detail = value.error.detail;

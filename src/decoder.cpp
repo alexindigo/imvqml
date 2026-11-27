@@ -4,6 +4,9 @@
 #include <QCoreApplication>
 
 #include <fcntl.h>
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
 #include <signal.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
@@ -42,7 +45,15 @@ Imv::DecodeReport decodeInput(int input, int output, const Imv::DecodeSpec &spec
 } // namespace
 
 int main(int argc, char **argv) {
-    constexpr rlim_t addressBudget = 1024ull * 1024 * 1024;
+#ifdef __GLIBC__
+    // Do this before Qt, libvips or libmpv starts worker threads. Otherwise
+    // each active arena can reserve a 64 MiB heap on 64-bit glibc.
+    if (!::mallopt(M_ARENA_MAX, 2))
+        return 2;
+#endif
+    // Runtime, two full-size RGBA work buffers, native decode and headroom;
+    // see Architecture.md. This caps virtual space, not resident memory.
+    constexpr rlim_t addressBudget = 1536ull * 1024 * 1024;
     const rlimit address{addressBudget, addressBudget};
     const rlimit noCore{0, 0};
     if (::setrlimit(RLIMIT_AS, &address) != 0 || ::setrlimit(RLIMIT_CORE, &noCore) != 0)

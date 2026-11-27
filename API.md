@@ -82,6 +82,14 @@ fraction from 0 (first frame) to 1 (near the end) when duration is known.
 `sourceInfo.format` is `video` with oriented dimensions and one frame.
 When compatible libmpv is unavailable, video yields
 `inspect/unsupported-format` with `detail: "video-support-unavailable"`.
+If a native video operation fails after loading the runtime, `detail` can add
+the failing call or event, libmpv's error, the calling thread's `errno` when
+available, and the helper process's lifetime peak virtual address space
+(`VmPeak`, when available). It can also include up to five recent warning or
+error lines from that capture, truncated individually. Asynchronous events
+do not report another thread's `errno`. This diagnostic text is for humans;
+use `stage` and `code` for programmatic handling. No diagnostics are written
+to the terminal or included in a successful result.
 
 ## Cache policy and thumbnails
 

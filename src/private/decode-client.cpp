@@ -58,7 +58,7 @@ bool sealedOutput(int fd, qint64 bytes) {
            S_ISREG(info.st_mode) && info.st_size == bytes;
 }
 
-OpenedSource openData(const QUrl &url) {
+OpenedSource openData(const QUrl &url, SourceLimit limit) {
     if (!url.isValid() || url.hasFragment() || !url.authority().isEmpty())
         return fail("admission", "invalid-source", "Malformed data URL");
     // QUrl already owns its encoded text. Materialize only one normalized
@@ -112,7 +112,7 @@ OpenedSource openData(const QUrl &url) {
                 return fail("admission", "invalid-source", "Malformed base64 data URL");
             block = std::move(decoded.decoded);
         }
-        if (!size)
+        if (!size && limit == SourceLimit::Decode)
             video = videoDemuxer(QByteArrayView(block).left(VideoSignatureBytes));
         if (!video && block.size() > MaxSourceBytes - size)
             return fail("admission", "too-large", "Source exceeds 256 MiB");
@@ -173,9 +173,9 @@ QString localPath(const QUrl &url) {
     return path.contains(QChar::Null) ? QString{} : path;
 }
 
-CapturedSource captureSource(const QUrl &url) {
+CapturedSource captureSource(const QUrl &url, SourceLimit limit) {
     if (url.scheme() == "data")
-        return {url};
+        return {url, {}, {}, {}, limit};
     const auto path = localPath(url);
     if (path.isEmpty())
         return {{},
@@ -187,7 +187,9 @@ CapturedSource captureSource(const QUrl &url) {
     struct stat info{};
     if (!fd || ::fstat(fd.get(), &info) != 0 || !S_ISREG(info.st_mode))
         return {{}, {}, {}, {"open", "unreadable", "Cannot open a readable regular file"}};
-    return {{}, std::move(fd), info};
+    if (limit == SourceLimit::Strict && info.st_size > MaxSourceBytes)
+        return {{}, {}, {}, {"admission", "too-large", "Source exceeds 256 MiB"}};
+    return {{}, std::move(fd), info, {}, limit};
 }
 
 namespace {
@@ -200,7 +202,7 @@ OpenedSource materialize(CapturedSource source) {
     if (source.error)
         return {{}, {}, std::move(source.error)};
     if (!source.fd)
-        return openData(source.data);
+        return openData(source.data, source.limit);
     const auto &fd = source.fd;
     const auto &info = source.file;
     // Rename/unlink can change ctime without changing the owned file's pixels.
@@ -231,9 +233,12 @@ OpenedSource materialize(CapturedSource source) {
         position += count;
     }
     struct stat after{};
+    // Retention permits the producer to unlink throughout the copy. That can
+    // change ctime alone. In-place edits are outside the caller's contract.
     if (::fstat(fd.get(), &after) || !sameContentStat(before, after) ||
-        before.st_ctim.tv_sec != after.st_ctim.tv_sec ||
-        before.st_ctim.tv_nsec != after.st_ctim.tv_nsec ||
+        (source.limit == SourceLimit::Decode &&
+         (before.st_ctim.tv_sec != after.st_ctim.tv_sec ||
+          before.st_ctim.tv_nsec != after.st_ctim.tv_nsec)) ||
         ::fcntl(snapshot.get(), F_ADD_SEALS, MemfdSeals) < 0)
         return fail("open", "unreadable", "Could not seal an unchanged source revision");
     return {std::move(snapshot), std::move(identity), {}, info};

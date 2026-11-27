@@ -38,7 +38,7 @@ ImagePipeline::Interest ImagePipeline::requestExplicit(DecodeSpec spec, Done don
     if (m_queue.size() >= QueueLimit)
         return {};
     auto lease = listen(std::move(done), false);
-    enqueue(lease, spec, Capturing)->oneShot = kind == Explicit::OneShot;
+    enqueue(lease, spec, Capturing)->kind = kind;
     return lease;
 }
 
@@ -109,7 +109,7 @@ void ImagePipeline::opened(const std::shared_ptr<Pending> &request, OpenedSource
         finish(request, {{}, {}, std::move(source.error)});
         return;
     }
-    if (request->oneShot) {
+    if (request->oneShot()) {
         request->input = std::make_shared<Fd>(std::move(source.fd));
         request->file = source.file;
         request->phase = Ready;
@@ -190,7 +190,8 @@ void ImagePipeline::pump() {
         // A one-shot job retains its slot through publication, so payloads
         // cannot accumulate in the render encoder's worker queue.
         const auto activeJobs = std::ranges::count_if(m_queue, [](const auto &request) {
-            return request->oneShot && (request->phase == Decoding || request->phase == Finishing);
+            return request->oneShot() &&
+                   (request->phase == Decoding || request->phase == Finishing);
         });
         const auto capacity = m_pool.capacity();
         const bool canStage = reservations < qMin(m_pool.idleSlots(), StagedLimit) ||
@@ -201,12 +202,13 @@ void ImagePipeline::pump() {
         for (const auto &candidate : std::as_const(m_queue)) {
             const bool alreadyOpen = std::holds_alternative<OpenedSource>(candidate->source);
             const bool provider = std::holds_alternative<ProviderSnapshot>(candidate->source);
-            if (candidate->oneShot && activeJobs >= 2)
+            if (candidate->oneShot() && activeJobs >= 2)
                 continue;
             if (!(candidate->phase == Ready && canDecode) &&
-                !(candidate->phase == Waiting && (alreadyOpen ? reservations < StagedLimit
-                                                  : provider  ? canDecode
-                                                              : canStage && !sourceBusy)))
+                !(candidate->phase == Waiting &&
+                  (alreadyOpen ? reservations < StagedLimit
+                   : provider  ? (canDecode || candidate->kind == Explicit::RetainOriginal)
+                               : canStage && !sourceBusy)))
                 continue;
             const bool visible = std::ranges::any_of(candidate->listeners, [](const auto &weak) {
                 const auto listener = weak.lock();
@@ -225,7 +227,11 @@ void ImagePipeline::pump() {
         } else if (next->phase == Ready) {
             submit(next);
         } else if (auto *provider = std::get_if<ProviderSnapshot>(&next->source)) {
-            auto decoded = rasterizeProvider(*provider, next->spec);
+            // A provider has pixels but no encoded bytes. Export its owned
+            // native snapshot without fitting it or asking the provider again.
+            auto decoded = next->kind == Explicit::RetainOriginal
+                               ? Decoded{{"png", provider->original}, std::move(provider->pixels)}
+                               : rasterizeProvider(*provider, next->spec);
             next->source = PreparationInput{};
             finish(next, std::move(decoded));
         } else if (auto *input = std::get_if<OpenedSource>(&next->source)) {
@@ -321,11 +327,13 @@ void ImagePipeline::deliver(std::weak_ptr<Listener> listener, Asset asset, Failu
 
 void ImagePipeline::finish(const std::shared_ptr<Pending> &request, Decoded decoded, bool hit,
                            Asset asset) {
-    if (request->oneShot && !decoded.error) {
+    if (request->oneShot() && !decoded.error) {
         request->phase = Finishing;
+        ImageAsset finished{{}, std::move(decoded.source), std::move(decoded.pixels)};
+        if (request->kind == Explicit::RetainOriginal)
+            finished.original = request->input;
         request->input.reset();
-        asset = std::make_shared<const ImageAsset>(
-            ImageAsset{{}, std::move(decoded.source), std::move(decoded.pixels)});
+        asset = std::make_shared<const ImageAsset>(std::move(finished));
         for (const auto &weak : std::as_const(request->listeners))
             deliver(weak, asset, {});
         return;

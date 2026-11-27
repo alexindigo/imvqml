@@ -23,6 +23,7 @@ struct ImageAsset {
     bool transient = false;
     ImageStore::Lease storeLease;
     std::optional<struct stat> file;
+    std::shared_ptr<const Fd> original;
 };
 using Asset = std::shared_ptr<const ImageAsset>;
 
@@ -47,7 +48,7 @@ public:
                      bool visible = true);
     // Only hard queue overflow rejects synchronously. The caller starts capture
     // before returning its ticket; a provider response may resolve later.
-    enum class Explicit { OneShot, Thumbnail };
+    enum class Explicit { OneShot, RetainOriginal, Thumbnail };
     Interest requestExplicit(DecodeSpec spec, Done done, Explicit kind = Explicit::OneShot);
     void captured(const Interest &interest, std::variant<CapturedSource, ProviderSnapshot> input);
     void setVisible(const Interest &interest, bool visible);
@@ -65,7 +66,8 @@ private:
         Phase phase = Waiting;
         quint64 order = 0;
         int ticket = 0;
-        bool oneShot = false;
+        std::optional<Explicit> kind;
+        bool oneShot() const { return kind && kind != Explicit::Thumbnail; }
         std::shared_ptr<void> preparing;
         QList<std::weak_ptr<Listener>> listeners;
         bool classified = false;

@@ -34,13 +34,15 @@ struct Decoded {
 };
 
 QString localPath(const QUrl &url);
+enum class SourceLimit { Decode, Strict };
 struct CapturedSource {
     QUrl data;
     Fd fd;
     struct stat file{};
     Failure error;
+    SourceLimit limit = SourceLimit::Decode;
 };
-CapturedSource captureSource(const QUrl &url);
+CapturedSource captureSource(const QUrl &url, SourceLimit limit = SourceLimit::Decode);
 OpenedSource openSource(const QUrl &url);
 OpenedSource openSource(const QByteArray &bytes);
 using SourceInput = std::variant<QUrl, QByteArray>;

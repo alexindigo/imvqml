@@ -138,12 +138,28 @@ Uncompressed output edges must be 1 to 8192 pixels.
 | `inspect(source)` | `sourceInfo` with `format`, oriented `width` and `height`, `frames`, `loop` (0 means infinite) |
 | `sample(source, maxWidth, maxHeight, videoPosition = 0)` | `sourceInfo`, fitted `width` and `height`, and owned packed unpremultiplied RGBA8 `rgba` (QML `ArrayBuffer`) |
 | `render(source, maxWidth, maxHeight, destination, format = "png", videoPosition = 0)` | `sourceInfo`, fitted `width` and `height`, and a published local file; `format` is `png` or `webp` (lossless) |
+| `retainOriginal(source, destinationDirectory)` | Absolute local `path`, `size` in bytes, lowercase hex `sha256`, and detected `format` (the same format names as `inspect`) |
 
 Sample and render select the first image frame and do not upscale. Render needs an
 existing staging directory and an unused destination on a filesystem that
 supports same-directory hard links. It never replaces a name. `cancel(id)`
 returns false if the ticket is gone or atomic publication has begun; if it
 returns true, the job cannot publish its output.
+
+`retainOriginal` preserves the exact encoded bytes of file and `data:`
+sources, including metadata and all animation frames. At call time it opens
+local inputs with `O_NONBLOCK` and `O_CLOEXEC`, rejects non-regular inputs,
+and checks the 256 MiB source limit on the descriptor (no video exception).
+It reads no file contents on the GUI thread. You can unlink the source or
+replace its directory entry immediately after the call, but must not modify
+the opened file in place. The worker snapshots from that descriptor, the
+decoder inspects the snapshot, and the worker publishes those same bytes.
+Inspection errors prevent publication. Providers expose pixels, not encoded
+bytes; their native snapshot is retained as a lossless PNG (`format: "png"`).
+
+Supply an existing, writable local directory that supports hard links. Keep
+its path stable while the job runs. The job generates its own opaque file
+name, never overwrites a file, and does not manage the result after success.
 
 A positive ticket is returned immediately, including for queued work.
 `finished(id, result)` is delivered once, queued, while the receiver exists.
@@ -161,7 +177,7 @@ share the 128-request limit and the eight-second admission deadline. Jobs and
 thumbnail decodes use background priority. Admission expiry is
 `admission/deadline`; display and thumbnail decode overflow report the same
 code. Helper execution has its own deadline. Video frame sources follow the
-same rules. A render keeps its execution slot through encoding and
+same rules. Render and retention jobs keep their execution slot through
 publication. Thumbnail writer overflow or expiry is `store/deadline`.
 
 The process pool is private. Its capacity pressure is retryable admission

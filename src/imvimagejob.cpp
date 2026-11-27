@@ -13,7 +13,7 @@
 
 namespace Imv {
 struct ImvImageJob::State {
-    enum Method { Inspect, Sample, Render };
+    enum Method { Inspect, Sample, Render, RetainOriginal };
     struct Dispatch {
         std::mutex lock;
         ImvImageJob *target;
@@ -24,7 +24,7 @@ struct ImvImageJob::State {
         QString destination, format;
         std::atomic<Publication> phase{Publication::Staging};
         std::function<void()> cancelProvider;
-        bool encoding = false;
+        bool writing = false;
         ImagePipeline::Interest interest;
     };
 
@@ -50,8 +50,10 @@ struct ImvImageJob::State {
               QString format = {}, double position = 0) {
         if (lastId == std::numeric_limits<int>::max())
             return -3;
-        const DecodeSpec spec{method == Inspect ? DecodeSpec::Inspect : DecodeSpec::Pixels, bounds,
-                              DecodeSpec::Contain, 0, position};
+        const bool retaining = method == RetainOriginal;
+        const DecodeSpec spec{method == Inspect || retaining ? DecodeSpec::Inspect
+                                                             : DecodeSpec::Pixels,
+                              bounds, DecodeSpec::Contain, 0, position};
         QString path;
         Failure argumentError;
         if (!DecodeSpec::validPosition(position)) {
@@ -70,6 +72,13 @@ struct ImvImageJob::State {
             } else {
                 path = QDir::current().absoluteFilePath(path);
             }
+        } else if (retaining) {
+            path = localPath(dest);
+            if (path.isEmpty())
+                argumentError = {"admission", "invalid-destination",
+                                 "Retain requires a local directory"};
+            else
+                path = QDir::current().absoluteFilePath(path);
         }
         auto job = std::shared_ptr<Active>(
             new Active{lastId + 1, method, std::move(path), std::move(format)});
@@ -83,10 +92,12 @@ struct ImvImageJob::State {
         const QPointer<ImvImageJob> receiver(&q);
         auto &pipeline = imagePipeline();
         job->interest = pipeline.requestExplicit(
-            spec, [receiver, weak = std::weak_ptr(job)](Asset asset, Failure error) {
+            spec,
+            [receiver, weak = std::weak_ptr(job)](Asset asset, Failure error) {
                 if (auto active = weak.lock(); receiver && active)
                     receiver->d->decoded(active, std::move(asset), std::move(error));
-            });
+            },
+            retaining ? ImagePipeline::Explicit::RetainOriginal : ImagePipeline::Explicit::OneShot);
         if (!job->interest)
             return -2;
         ++lastId;
@@ -103,7 +114,8 @@ struct ImvImageJob::State {
             else if (cancel)
                 cancel();
         } else {
-            pipeline.captured(job->interest, captureSource(url));
+            pipeline.captured(job->interest, captureSource(url, retaining ? SourceLimit::Strict
+                                                                          : SourceLimit::Decode));
         }
         return job->id;
     }
@@ -141,6 +153,11 @@ struct ImvImageJob::State {
             finish(job, std::move(result));
             return;
         }
+        if (job->method == RetainOriginal) {
+            result.remove("sourceInfo");
+            write(job, std::move(image), std::move(result));
+            return;
+        }
         result.insert("width", image->pixels.width());
         result.insert("height", image->pixels.height());
         if (job->method == Sample) {
@@ -150,11 +167,26 @@ struct ImvImageJob::State {
             finish(job, std::move(result));
             return;
         }
-        job->encoding = true;
-        QThreadPool::globalInstance()->start([dispatch = dispatch, job, image = image->pixels,
+        write(job, std::move(image), std::move(result));
+    }
+
+    void write(const std::shared_ptr<Active> &job, Asset image, QVariantMap result) {
+        job->writing = true;
+        QThreadPool::globalInstance()->start([dispatch = dispatch, job, image = std::move(image),
                                               result = std::move(result)]() mutable {
-            auto error = stageImage(job->destination, job->format, image, job->phase);
-            image = {};
+            Failure error;
+            if (job->method == RetainOriginal) {
+                auto retained = stageOriginal(job->destination, image->original.get(),
+                                              image->pixels, job->phase);
+                error = std::move(retained.error);
+                result.insert("path", std::move(retained.path));
+                result.insert("size", retained.size);
+                result.insert("sha256", std::move(retained.sha256));
+                result.insert("format", image->info.format);
+            } else {
+                error = stageImage(job->destination, job->format, image->pixels, job->phase);
+            }
+            image.reset();
             if (error)
                 result = asMap(error);
             const std::lock_guard lock(dispatch->lock);
@@ -188,12 +220,15 @@ int ImvImageJob::render(const QUrl &source, int width, int height, const QUrl &d
                         const QString &format, double position) {
     return d->begin(State::Render, source, QSize(width, height), destination, format, position);
 }
+int ImvImageJob::retainOriginal(const QUrl &source, const QUrl &destinationDirectory) {
+    return d->begin(State::RetainOriginal, source, QSize(0, 0), destinationDirectory);
+}
 bool ImvImageJob::cancel(int id) {
     auto job = d->jobs.value(id);
     auto expected = Publication::Staging;
     if (!job || !job->phase.compare_exchange_strong(expected, Publication::Cancelled))
         return false;
-    if (!job->encoding) {
+    if (!job->writing) {
         job->interest.reset();
         d->finishLater(job);
         if (auto cancel = std::exchange(job->cancelProvider, {}))

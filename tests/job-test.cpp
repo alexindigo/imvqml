@@ -11,8 +11,11 @@
 #include <QTemporaryDir>
 #include <QThreadPool>
 #include <QtTest>
+#include <cerrno>
+#include <fcntl.h>
 #include <limits>
 #include <sys/stat.h>
+#include <unistd.h>
 
 namespace {
 using Imv::ImvImageJob;
@@ -240,21 +243,65 @@ private slots:
         QCOMPARE(output.readAll(), expected);
     }
 
-    void retainRejections() {
+    void synchronousRefusal_data() {
+        QTest::addColumn<QString>("method");
+        QTest::addColumn<QString>("input");
+        for (const auto *method : {"inspect", "sample", "render", "retainOriginal"}) {
+            for (const auto *input : {"missing", "fifo", "denied", "network"})
+                QTest::newRow(QByteArray(method) + '-' + input)
+                    << QString(method) << QString(input);
+        }
+        QTest::newRow("retainOriginal-oversize") << QString("retainOriginal") << QString("large");
+    }
+
+    void synchronousRefusal() {
+        QFETCH(QString, method);
+        QFETCH(QString, input);
         ImvImageJob job;
         QSignalSpy spy(&job, &ImvImageJob::finished);
         QTemporaryDir dir;
         QVERIFY(dir.isValid());
-        const auto fifo = dir.filePath("fifo");
-        QCOMPARE(::mkfifo(QFile::encodeName(fifo).constData(), 0600), 0);
-        const auto fifoResult = result(spy, retain(job, QUrl::fromLocalFile(fifo), dir.path()));
-        QCOMPARE(fifoResult.value("stage").toString(), "open");
-        QCOMPARE(fifoResult.value("code").toString(), "unreadable");
-        const auto large = result(spy, retain(job, fixture("large-source"), dir.path()));
-        QCOMPARE(large.value("stage").toString(), "admission");
-        QCOMPARE(large.value("code").toString(), "too-large");
-        QCOMPARE(QDir(dir.path()).entryList(QDir::AllEntries | QDir::Hidden | QDir::NoDotAndDotDot),
-                 QStringList{});
+        const auto path = dir.filePath("input");
+        auto source = QUrl::fromLocalFile(path);
+        if (input == "fifo") {
+            QCOMPARE(::mkfifo(QFile::encodeName(path).constData(), 0600), 0);
+        } else if (input == "denied") {
+            if (::geteuid() == 0)
+                QSKIP("mode 000 requires an unprivileged test runner");
+            QFile file(path);
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            file.close();
+            QCOMPARE(::chmod(QFile::encodeName(path).constData(), 0000), 0);
+            Imv::Fd denied(::open(QFile::encodeName(path).constData(), O_RDONLY | O_CLOEXEC));
+            const auto openError = errno;
+            QVERIFY(!denied);
+            QCOMPARE(openError, EACCES);
+        } else if (input == "large") {
+            source = fixture("large-source");
+        } else if (input == "network") {
+            source = QUrl("https://example.invalid/image.png");
+        }
+        const auto dest = QUrl::fromLocalFile(dir.filePath("output.png"));
+        const int id = method == "inspect"  ? job.inspect(source)
+                       : method == "sample" ? job.sample(source, 20, 20)
+                       : method == "render" ? job.render(source, 20, 20, dest)
+                                            : retain(job, source, dir.path());
+        const bool large = input == "large", network = input == "network";
+        QCOMPARE(id, large ? -5 : network ? -1 : -4);
+        QCOMPARE(job.property("lastErrorStage").toString(),
+                 large || network ? "admission" : "open");
+        QCOMPARE(job.property("lastErrorCode").toString(), large     ? "too-large"
+                                                           : network ? "invalid-source"
+                                                                     : "unreadable");
+        QVERIFY(!job.property("lastErrorDetail").toString().isEmpty());
+        QVERIFY(!job.cancel(id));
+        const auto accepted = job.inspect(fixture("palette.png"));
+        QCOMPARE(accepted, 1);
+        QVERIFY(job.property("lastErrorCode").toString().isEmpty());
+        QCOMPARE(result(spy, accepted).value("stage").toString(), "complete");
+        QCoreApplication::processEvents();
+        QVERIFY(spy.isEmpty());
+        QVERIFY(!QFile::exists(dest.toLocalFile()));
     }
 
     void retainDataAndCancelDuringStaging() {
@@ -338,8 +385,6 @@ private slots:
             << QString("large-source") << QString("admission") << QString("too-large");
         QTest::newRow("header pixels")
             << QString("huge.png") << QString("inspect") << QString("too-large");
-        QTest::newRow("not found")
-            << QString("missing.jpg") << QString("open") << QString("unreadable");
     }
     void outcomes() {
         QFETCH(QString, name);
@@ -358,12 +403,16 @@ private slots:
         ImvImageJob job;
         QSignalSpy spy(&job, &ImvImageJob::finished);
         for (const auto position : {-0.01, 1.01, std::numeric_limits<double>::quiet_NaN()}) {
-            const auto failure = result(spy, job.sample(fixture("palette.png"), 20, 20, position));
-            QCOMPARE(failure.value("stage").toString(), "admission");
-            QCOMPARE(failure.value("code").toString(), "invalid-position");
+            QCOMPARE(job.sample(fixture("palette.png"), 20, 20, position), -1);
+            QCOMPARE(job.property("lastErrorStage").toString(), "admission");
+            QCOMPARE(job.property("lastErrorCode").toString(), "invalid-position");
         }
-        const auto failure = result(spy, job.sample(fixture("palette.png"), 0, 20));
-        QCOMPARE(failure.value("code").toString(), "invalid-size");
+        QCOMPARE(job.sample(fixture("palette.png"), 0, 20), -1);
+        QCOMPARE(job.property("lastErrorCode").toString(), "invalid-size");
+        QCOMPARE(job.render(fixture("palette.png"), 20, 20, QUrl{}), -1);
+        QCOMPARE(job.property("lastErrorCode").toString(), "invalid-destination");
+        QCoreApplication::processEvents();
+        QVERIFY(spy.isEmpty());
     }
 
     void exportRace_data() {

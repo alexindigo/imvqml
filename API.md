@@ -41,6 +41,13 @@ pixels are copied as soon as the response arrives. Resizing or changing fill
 mode uses the snapshot, not a new provider request. No new codec runs in the
 application for providers.
 
+Local files are opened and checked at source assignment, even if the item has
+no window or size yet. A refusal sets `Failed` and the error properties before
+the setter returns, without entering `Loading`. Successful assignments keep
+the opened revision for decoding and resizing. To retry a refused source,
+clear `source` and assign it again. File contents are still read off the GUI
+thread.
+
 | Property | Behavior |
 |---|---|
 | `fillMode` | `ImvImage.Contain` (default), `Cover` (center crop), or `Stretch` |
@@ -161,13 +168,29 @@ Supply an existing, writable local directory that supports hard links. Keep
 its path stable while the job runs. The job generates its own opaque file
 name, never overwrites a file, and does not manage the result after success.
 
-A positive ticket is returned immediately, including for queued work.
+A positive ticket is returned for accepted work, including queued work.
 `finished(id, result)` is delivered once, queued, while the receiver exists.
 The result always includes `stage`, `code`, `detail`; success is `complete` with
-empty code and detail. A job can be cancelled by ticket while queued. `-2` is
-rare: only a full shared queue returns busy, and no input is captured. Retry
-only if the original input is still available. `-3` signals local ticket
-exhaustion. Negative returns do not emit `finished`.
+empty code and detail. A job can be cancelled by ticket while queued.
+
+A call-time refusal returns a negative result immediately, without allocating
+a ticket or emitting `finished`. Read the job's `lastErrorStage`,
+`lastErrorCode`, and `lastErrorDetail` immediately after the call. They describe
+the most recent submission, are cleared by an accepted submission, and are not
+binding notifications or updated by an asynchronous completion.
+
+| Result / `ImvImageJob` enum | Meaning |
+|---|---|
+| `-1` / `InvalidRequest` | Invalid arguments, unsupported source URL, missing provider, or another synchronous failure not listed below. |
+| `-2` / `Busy` | Shared queue is full (`admission/busy`); no input is captured. Retry only if the input is still available. |
+| `-3` / `TicketExhausted` | This job object has no more ticket IDs (`admission/ticket-exhausted`). |
+| `-4` / `UnreadableSource` | Source cannot be opened or is not a readable regular file (`open/unreadable`), or a synchronous provider did not supply readable pixels. |
+| `-5` / `SourceTooLarge` | Capture already established a size refusal, for example `retainOriginal`'s `fstat` size limit (`admission/too-large`). |
+
+For `inspect`, `sample`, and `render`, a local file over 256 MiB may be a
+streamable video. The helper determines its format; any resulting size refusal
+is asynchronous. Invalid encoded content, errors reading the opened revision,
+and failures reported later by an asynchronous provider also use `finished`.
 
 `ImvImage` remains `Loading` while waiting for admission. Visible items go
 first; within each priority, pending requests go in arrival order. Source

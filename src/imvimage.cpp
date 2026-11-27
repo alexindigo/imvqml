@@ -40,6 +40,8 @@ struct ImvImage::State {
     QUrl url;
     QByteArray bytes;
     bool hasBytes = false;
+    std::optional<CapturedSource> captured;
+    Failure sourceError;
     std::shared_ptr<std::optional<ProviderSnapshot>> provider;
     std::function<void()> cancelProvider;
     FillMode fill = Contain;
@@ -116,6 +118,15 @@ void ImvImage::setSource(const QUrl &source) {
     d->hasBytes = false;
     d->bytes.clear();
     d->url = resolved;
+    d->captured.reset();
+    d->sourceError = {};
+    if (!resolved.isEmpty() && resolved.scheme() != "image") {
+        auto capture = captureSource(resolved);
+        if (auto *error = std::get_if<Failure>(&capture))
+            d->sourceError = std::move(*error);
+        else
+            d->captured = std::get<CapturedSource>(std::move(capture));
+    }
     const QPointer guard(this);
     const auto pending = resolved.scheme() == "image"
                              ? std::make_shared<std::optional<ProviderSnapshot>>()
@@ -125,19 +136,26 @@ void ImvImage::setSource(const QUrl &source) {
     if (!guard || d->url != resolved || d->provider != pending || d->hasBytes)
         return;
     if (pending) {
-        auto cancel = snapshotProvider(qmlEngine(this), resolved, this,
-                                       [guard, pending](ProviderSnapshot value) {
-                                           if (!guard || guard->d->provider != pending)
-                                               return;
-                                           pending->emplace(std::move(value));
-                                           guard->polish();
-                                       });
+        auto capture = snapshotProvider(qmlEngine(this), resolved, this,
+                                        [guard, pending](ProviderSnapshot value) {
+                                            if (!guard || guard->d->provider != pending)
+                                                return;
+                                            pending->emplace(std::move(value));
+                                            guard->polish();
+                                        });
         if (!guard || d->provider != pending) {
-            if (cancel)
-                cancel();
+            if (auto *cancel = std::get_if<std::function<void()>>(&capture))
+                (*cancel)();
             return;
         }
-        d->cancelProvider = std::move(cancel);
+        if (auto *snapshot = std::get_if<ProviderSnapshot>(&capture)) {
+            if (snapshot->error)
+                d->sourceError = std::move(snapshot->error);
+            else
+                pending->emplace(std::move(*snapshot));
+        } else {
+            d->cancelProvider = std::get<std::function<void()>>(std::move(capture));
+        }
     }
     resetRequest(true);
     if (guard && d->url == resolved && d->provider == pending && !d->hasBytes)
@@ -150,6 +168,8 @@ void ImvImage::setBytes(const QByteArray &bytes) {
     d->bytes = bytes;
     d->bytes.detach();
     d->url.clear();
+    d->captured.reset();
+    d->sourceError = {};
     const QPointer guard(this);
     d->provider.reset();
     d->cancelSnapshot();
@@ -273,7 +293,10 @@ void ImvImage::resetRequest(bool discard) {
     refreshPresentation();
     const QPointer guard(this);
     const auto generation = d->generation;
-    setOutcome(!d->hasBytes && d->url.isEmpty() ? Idle : Loading);
+    if (d->sourceError)
+        setOutcome(Failed, d->sourceError.stage, d->sourceError.code, d->sourceError.detail);
+    else
+        setOutcome(!d->hasBytes && d->url.isEmpty() ? Idle : Loading);
     if (guard && generation == d->generation && hadInfo)
         emit sourceInfoChanged();
 }
@@ -303,7 +326,7 @@ void ImvImage::geometryChange(const QRectF &now, const QRectF &before) {
 }
 
 void ImvImage::updatePolish() {
-    if (!d->hasBytes && d->url.isEmpty())
+    if (d->sourceError || (!d->hasBytes && d->url.isEmpty()))
         return;
     if (d->provider && !*d->provider)
         return;
@@ -371,7 +394,7 @@ void ImvImage::updatePolish() {
                 imagePipeline().providerAsset(std::move(decoded.pixels), decoded.source.size, spec),
                 {});
     } else {
-        auto source = d->hasBytes ? SourceInput(d->bytes) : SourceInput(d->url);
+        auto source = d->hasBytes ? SourceInput(d->bytes) : SourceInput(*d->captured);
         d->interest = imagePipeline().request(std::move(source), spec, done, displayVisible(*this));
     }
 }

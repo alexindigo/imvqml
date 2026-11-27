@@ -19,7 +19,7 @@ struct ImvImageJob::State {
         ImvImageJob *target;
     };
     struct Active {
-        int id;
+        int id = 0;
         Method method;
         QString destination, format;
         std::atomic<Publication> phase{Publication::Staging};
@@ -46,10 +46,26 @@ struct ImvImageJob::State {
         }
     }
 
+    int refuse(Failure error, int result = InvalidRequest) {
+        if (result == InvalidRequest) {
+            if (error.code == "unreadable")
+                result = UnreadableSource;
+            else if (error.code == "too-large")
+                result = SourceTooLarge;
+        }
+        lastError = std::move(error);
+        return result;
+    }
+
+    int exhausted() {
+        return refuse({"admission", "ticket-exhausted", "Image job tickets exhausted"},
+                      TicketExhausted);
+    }
+
     int begin(Method method, const QUrl &url, QSize bounds, const QUrl &dest = {},
               QString format = {}, double position = 0) {
         if (lastId == std::numeric_limits<int>::max())
-            return -3;
+            return exhausted();
         const bool retaining = method == RetainOriginal;
         const DecodeSpec spec{method == Inspect || retaining ? DecodeSpec::Inspect
                                                              : DecodeSpec::Pixels,
@@ -80,15 +96,11 @@ struct ImvImageJob::State {
             else
                 path = QDir::current().absoluteFilePath(path);
         }
-        auto job = std::shared_ptr<Active>(
-            new Active{lastId + 1, method, std::move(path), std::move(format)});
-        if (argumentError) {
-            ++lastId;
-            jobs.insert(job->id, job);
-            finishLater(job, asMap(argumentError));
-            return job->id;
-        }
+        if (argumentError)
+            return refuse(std::move(argumentError));
 
+        auto job =
+            std::shared_ptr<Active>(new Active{0, method, std::move(path), std::move(format)});
         const QPointer<ImvImageJob> receiver(&q);
         auto &pipeline = imagePipeline();
         job->interest = pipeline.requestExplicit(
@@ -99,24 +111,40 @@ struct ImvImageJob::State {
             },
             retaining ? ImagePipeline::Explicit::RetainOriginal : ImagePipeline::Explicit::OneShot);
         if (!job->interest)
-            return -2;
-        ++lastId;
-        jobs.insert(job->id, job);
+            return refuse({"admission", "busy", "Image admission queue is full"}, Busy);
         if (url.scheme() == "image") {
-            auto cancel = snapshotProvider(
+            auto capture = snapshotProvider(
                 qmlEngine(&q), url, &q,
                 [receiver, weak = std::weak_ptr(job)](ProviderSnapshot image) {
                     if (const auto active = weak.lock(); receiver && active)
                         imagePipeline().captured(active->interest, std::move(image));
                 });
-            if (receiver && job->interest)
-                job->cancelProvider = std::move(cancel);
-            else if (cancel)
-                cancel();
+            if (auto *cancel = std::get_if<std::function<void()>>(&capture)) {
+                if (!receiver || lastId == std::numeric_limits<int>::max()) {
+                    (*cancel)();
+                    return receiver ? exhausted() : InvalidRequest;
+                }
+                job->cancelProvider = std::move(*cancel);
+            } else {
+                if (!receiver)
+                    return InvalidRequest;
+                auto &snapshot = std::get<ProviderSnapshot>(capture);
+                if (snapshot.error)
+                    return refuse(std::move(snapshot.error));
+                if (lastId == std::numeric_limits<int>::max())
+                    return exhausted();
+                pipeline.captured(job->interest, std::move(snapshot));
+            }
         } else {
-            pipeline.captured(job->interest, captureSource(url, retaining ? SourceLimit::Strict
-                                                                          : SourceLimit::Decode));
+            auto capture =
+                captureSource(url, retaining ? SourceLimit::Strict : SourceLimit::Decode);
+            if (auto *error = std::get_if<Failure>(&capture))
+                return refuse(std::move(*error));
+            pipeline.captured(job->interest, std::get<CapturedSource>(std::move(capture)));
         }
+        job->id = ++lastId;
+        jobs.insert(job->id, job);
+        lastError = {};
         return job->id;
     }
 
@@ -205,10 +233,15 @@ struct ImvImageJob::State {
     std::shared_ptr<Dispatch> dispatch;
     QHash<int, std::shared_ptr<Active>> jobs;
     int lastId = 0;
+    Failure lastError;
 };
 
 ImvImageJob::ImvImageJob(QObject *parent) : QObject(parent), d(std::make_unique<State>(*this)) {}
 ImvImageJob::~ImvImageJob() = default;
+
+QString ImvImageJob::lastErrorStage() const { return d->lastError.stage; }
+QString ImvImageJob::lastErrorCode() const { return d->lastError.code; }
+QString ImvImageJob::lastErrorDetail() const { return d->lastError.detail; }
 
 int ImvImageJob::inspect(const QUrl &source) {
     return d->begin(State::Inspect, source, QSize(0, 0));

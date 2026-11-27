@@ -19,6 +19,7 @@ class ItemTest : public QObject {
     Q_OBJECT
 private slots:
     void display();
+    void missingSource();
     void transientProvider_data();
     void transientProvider();
     void transientProviderJob();
@@ -337,6 +338,27 @@ void ItemTest::explicitQueueFull() {
     QTRY_COMPARE(done.size(), Imv::ImagePipeline::QueueLimit + 1);
     for (const auto &reply : done)
         QCOMPARE(reply[1].toMap().value("code").toString(), "cancelled");
+}
+
+void ItemTest::missingSource() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    Imv::ImvImage item;
+    QList<Imv::ImvImage::Status> states;
+    connect(&item, &Imv::ImvImage::statusChanged, this, [&] { states.append(item.status()); });
+    item.setSource(QUrl::fromLocalFile(dir.filePath("missing.png")));
+    QCOMPARE(item.status(), Imv::ImvImage::Failed);
+    QCOMPARE(item.errorStage(), "open");
+    QCOMPARE(item.errorCode(), "unreadable");
+    QVERIFY(!item.errorDetail().isEmpty());
+    QQuickWindow window;
+    item.setParentItem(window.contentItem());
+    item.setSize({20, 20});
+    item.setFillMode(Imv::ImvImage::Cover);
+    window.show();
+    QTRY_VERIFY(window.isExposed());
+    QCoreApplication::processEvents();
+    QCOMPARE(states, QList{Imv::ImvImage::Failed});
 }
 
 void ItemTest::display() {

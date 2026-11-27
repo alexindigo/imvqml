@@ -13,10 +13,11 @@ struct ProviderSnapshot {
     Failure error;
 };
 
-// Capture at native size on the GUI thread. Synchronous providers deliver
-// inline; async responses remain owned until finished() even if cancelled.
-std::function<void()> snapshotProvider(QQmlEngine *engine, const QUrl &url, QObject *receiver,
-                                       std::function<void(ProviderSnapshot)> done);
+// Synchronous providers return their snapshot or failure. Pending providers
+// return a cancellation handle and deliver their result via done.
+using ProviderCapture = std::variant<ProviderSnapshot, std::function<void()>>;
+ProviderCapture snapshotProvider(QQmlEngine *engine, const QUrl &url, QObject *receiver,
+                                 std::function<void(ProviderSnapshot)> done);
 Decoded rasterizeProvider(const ProviderSnapshot &snapshot, DecodeSpec spec);
 
 } // namespace Imv

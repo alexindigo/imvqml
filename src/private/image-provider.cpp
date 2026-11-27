@@ -71,16 +71,16 @@ Decoded rasterizeProvider(const ProviderSnapshot &snapshot, DecodeSpec spec) {
     return {source, std::move(image), {}};
 }
 
-std::function<void()> snapshotProvider(QQmlEngine *engine, const QUrl &url, QObject *receiver,
-                                       std::function<void(ProviderSnapshot)> done) {
+ProviderCapture snapshotProvider(QQmlEngine *engine, const QUrl &url, QObject *receiver,
+                                 std::function<void(ProviderSnapshot)> done) {
     auto *app = QCoreApplication::instance();
     auto *provider = app && engine && QThread::currentThread() == app->thread() &&
                              engine->thread() == app->thread()
                          ? dynamic_cast<QQuickImageProvider *>(engine->imageProvider(url.host()))
                          : nullptr;
     if (!provider || !url.isValid() || url.hasFragment()) {
-        done({{}, {}, {"admission", "invalid-source", "No matching application image provider"}});
-        return {};
+        return ProviderSnapshot{
+            {}, {}, {"admission", "invalid-source", "No matching application image provider"}};
     }
     auto id = url.path(QUrl::FullyEncoded).mid(1);
     if (url.hasQuery())
@@ -99,9 +99,8 @@ std::function<void()> snapshotProvider(QQmlEngine *engine, const QUrl &url, QObj
         auto factory = std::unique_ptr<QQuickTextureFactory>(
             provider->requestTexture(id, &original, nativeSize));
         // requestTexture writes original; evaluate it only after that call.
-        done(snapshotTexture(std::move(factory), original,
-                             QStringLiteral("Image provider did not return CPU pixels")));
-        return {};
+        return snapshotTexture(std::move(factory), original,
+                               QStringLiteral("Image provider did not return CPU pixels"));
     }
     case QQmlImageProviderBase::ImageResponse: {
         auto *async = dynamic_cast<QQuickAsyncImageProvider *>(provider);
@@ -133,7 +132,6 @@ std::function<void()> snapshotProvider(QQmlEngine *engine, const QUrl &url, QObj
         };
     }
     }
-    done(snapshot(std::move(image), original));
-    return {};
+    return snapshot(std::move(image), original);
 }
 } // namespace Imv

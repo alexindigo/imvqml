@@ -91,9 +91,10 @@ does not interrupt a preparation or decode already in flight.
 Source and helper capacity release wake the dispatcher. Queued admission has
 an eight-second monotonic deadline, separate from the helper's execution timer;
 an animation classification reply opens a fresh admission window for pixels.
-Only hard queue overflow rejects an explicit image job before capture; it
-returns busy without issuing a ticket. Display and thumbnail decode overflow
-report an admission deadline. After source identity is
+Explicit image jobs reserve queue space before capturing a source. Overflow
+returns busy without capturing input. An argument or capture refusal does not
+issue a ticket; only accepted jobs enter the public ticket ledger. Display and
+thumbnail decode overflow report an admission deadline. After source identity is
 known, matching work coalesces and the last listener's withdrawal drops queued
 work or cancels an admitted ticket. Withdrawal is independent of helper
 retirement. A generation
@@ -102,8 +103,10 @@ outcome separately. A failed update can keep the last valid texture for the
 same source; a successful replacement recovers the item. The pipeline's result index
 is weak: it owns neither idle mappings nor scene-graph resources.
 
-Explicit calls immediately own their encoded data or file descriptor, or
-request a provider snapshot, before waiting for helper capacity. Qt image
+Jobs and display assignments immediately own their encoded data or file
+descriptor, or request a provider snapshot. Capture reports a refusal before
+jobs issue a ticket or a display item enters Loading. Descriptor materialization
+and decoding remain off the GUI thread. Qt image
 providers are a separate source boundary: items and image jobs own native-size
 CPU pixels on the GUI thread at assignment or call time, or when an async
 response arrives. Fitting and rendering never re-request transient provider

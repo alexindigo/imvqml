@@ -50,7 +50,8 @@ public:
     // before returning its ticket; a provider response may resolve later.
     enum class Explicit { OneShot, RetainOriginal, Thumbnail };
     Interest requestExplicit(DecodeSpec spec, Done done, Explicit kind = Explicit::OneShot);
-    void captured(const Interest &interest, std::variant<CapturedSource, ProviderSnapshot> input);
+    void captured(const Interest &interest,
+                  std::variant<CapturedSource, ProviderSnapshot, Failure> input);
     void setVisible(const Interest &interest, bool visible);
     Asset providerAsset(QImage pixels, QSize original, DecodeSpec spec);
     quint64 submissions() const { return m_submissions; }
@@ -58,7 +59,7 @@ public:
 private:
     enum Phase { Capturing, Waiting, Preparing, LookingUp, Ready, Decoding, Finishing };
     struct Pending {
-        std::variant<PreparationInput, OpenedSource, ProviderSnapshot> source;
+        std::variant<SourceInput, OpenedSource, ProviderSnapshot> source;
         QByteArray key;
         std::shared_ptr<Fd> input;
         DecodeSpec spec;

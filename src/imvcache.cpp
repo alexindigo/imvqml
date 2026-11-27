@@ -150,7 +150,8 @@ int ImvCache::exportThumbnail(const QUrl &source, int size) {
             Qt::QueuedConnection);
     } else {
         d->exports.insert(id, interest);
-        pipeline.captured(interest, captureSource(QUrl::fromLocalFile(path)));
+        std::visit([&](auto &&input) { pipeline.captured(interest, std::move(input)); },
+                   captureSource(QUrl::fromLocalFile(path)));
     }
     return id;
 }

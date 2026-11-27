@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.4] - 2026-11-26
+
+### Fix
+
+The isolated decoder limits glibc malloc arenas independently of CPU count
+and budgets more virtual address space for native decoding and full-size
+pixel buffers. This prevents the reproduced allocation failure during sparse
+H.264 video capture. Failed video jobs include the native call or event, peak
+virtual address space, and recent libmpv warnings when available; successful
+results remain unchanged.
+
+- Bound decoder allocator reservations (`96c0ff1`, merged in `91a3b32`).
+
 ## [0.1.3] - 2026-11-26
 
 ### Fix
